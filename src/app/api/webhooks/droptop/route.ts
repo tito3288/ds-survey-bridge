@@ -20,22 +20,34 @@ type NormalizedOrder = {
 };
 
 // TODO: replace with real Droptop field paths once payload is confirmed.
-function extractOrderFromPayload(body: any): NormalizedOrder {
-  const data = body?.data ?? {};
+type DroptopPayload = {
+  data?: {
+    id?: string;
+    customer?: { name?: string; phone?: string };
+    location_id?: string;
+    services?: unknown[];
+  };
+};
+
+function extractOrderFromPayload(body: unknown): NormalizedOrder {
+  const data = (body as DroptopPayload | null | undefined)?.data;
+  const customer = data?.customer;
+  const rawServices = data?.services;
   return {
-    orderId: data.id,                       // TODO: confirm
-    customerName: data.customer?.name,      // TODO: confirm
-    customerPhone: data.customer?.phone,    // TODO: confirm
-    locationId: data.location_id,           // TODO: confirm
-    services: Array.isArray(data.services) ? data.services : [], // TODO: confirm
+    orderId: data?.id,                       // TODO: confirm
+    customerName: customer?.name,            // TODO: confirm
+    customerPhone: customer?.phone,          // TODO: confirm
+    locationId: data?.location_id,           // TODO: confirm
+    services: Array.isArray(rawServices) ? rawServices : [], // TODO: confirm
   };
 }
 
 function isOilChange(services: unknown[]): boolean {
-  return services.some(
-    (s: any) =>
-      typeof s?.name === 'string' && s.name.toLowerCase().includes('oil change'),
-  );
+  return services.some((s) => {
+    if (!s || typeof s !== 'object') return false;
+    const name = (s as { name?: unknown }).name;
+    return typeof name === 'string' && name.toLowerCase().includes('oil change');
+  });
 }
 
 export async function POST(request: NextRequest) {
