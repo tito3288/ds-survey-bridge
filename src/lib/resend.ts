@@ -8,21 +8,28 @@ export async function sendNegativeFeedbackEmail(params: {
   orderId: string;
   rating: number;
   comment: string;
-  customerPhone?: string;
+  locationId?: string;
   locationName?: string;
+  customerPhone?: string;
 }) {
-  const { orderId, rating, comment, customerPhone, locationName } = params;
+  const { orderId, rating, comment, locationId, locationName, customerPhone } =
+    params;
+
+  const locationLine = locationName
+    ? `${locationName}${locationId ? ` (${locationId})` : ''}`
+    : locationId ?? 'Unknown';
 
   return resend.emails.send({
-    from: 'Drive & Shine Survey <noreply@driveandshine.com>',
+    // TODO: switch to 'Drive & Shine Survey <noreply@driveandshine.com>' once driveandshine.com is verified in Resend (production).
+    from: 'Drive & Shine <onboarding@resend.dev>',
     to: supportEmail,
-    subject: `Low rating (${rating}★) - Order ${orderId}`,
+    subject: `Negative feedback received - Order ${orderId}`,
     text: [
-      `A customer left a low rating.`,
+      `A customer left negative feedback.`,
       ``,
       `Order ID: ${orderId}`,
       `Rating: ${rating}/5`,
-      `Location: ${locationName ?? 'Unknown'}`,
+      `Location: ${locationLine}`,
       `Customer phone: ${customerPhone ?? 'Unknown'}`,
       ``,
       `Comment:`,
