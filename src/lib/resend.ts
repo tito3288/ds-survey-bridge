@@ -2,7 +2,12 @@ import { Resend } from 'resend';
 
 export const resend = new Resend(process.env.RESEND_API_KEY!);
 
-export const supportEmail = process.env.SUPPORT_EMAIL || 'support@driveandshine.com';
+export const supportEmails = (
+  process.env.SUPPORT_EMAIL || 'support@driveandshine.com'
+)
+  .split(',')
+  .map((e) => e.trim())
+  .filter(Boolean);
 
 export async function sendNegativeFeedbackEmail(params: {
   orderId: string;
@@ -22,7 +27,7 @@ export async function sendNegativeFeedbackEmail(params: {
   return resend.emails.send({
     // TODO: switch to 'Drive & Shine Survey <noreply@driveandshine.com>' once driveandshine.com is verified in Resend (production).
     from: 'Drive & Shine <onboarding@resend.dev>',
-    to: supportEmail,
+    to: supportEmails,
     subject: `Negative feedback received - Order ${orderId}`,
     text: [
       `A customer left negative feedback.`,
