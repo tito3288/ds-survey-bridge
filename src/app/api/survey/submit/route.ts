@@ -1,45 +1,141 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase';
-import { sendNegativeFeedbackEmail } from '@/lib/resend';
+import {
+  QUESTIONNAIRE_VERSION,
+  getGoogleReviewMinimumRating,
+  isSurveyScore,
+  shouldRouteToGoogleReview,
+  validateQuestionnaire,
+  type QuestionnaireAnswers,
+  type SurveyScore,
+} from '@/lib/questionnaire';
+import { sendPrivateFeedbackEmail } from '@/lib/resend';
+import { getSupabaseAdmin } from '@/lib/supabase';
+import type { Database } from '@/types/database';
 
-const FALLBACK_GOOGLE_URL = 'https://www.google.com/search?q=drive+and+shine';
+type RatingSubmission = {
+  kind: 'rating';
+  orderId: string;
+  rating: SurveyScore;
+};
+
+type QuestionnaireSubmission = {
+  kind: 'questionnaire';
+  orderId: string;
+  answers: QuestionnaireAnswers;
+  comment: string | null;
+};
+
+type Submission = RatingSubmission | QuestionnaireSubmission;
+
+type SubmissionValidationResult =
+  | { ok: true; value: Submission }
+  | { ok: false; error: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowedKeys: readonly string[],
+): boolean {
+  return Object.keys(value).every((key) => allowedKeys.includes(key));
+}
+
+function validateSubmission(body: unknown): SubmissionValidationResult {
+  if (!isRecord(body)) {
+    return { ok: false, error: 'Survey submission must be an object' };
+  }
+
+  if (typeof body.orderId !== 'string' || body.orderId.trim().length === 0) {
+    return { ok: false, error: 'orderId must be a non-empty string' };
+  }
+
+  const hasRating = Object.hasOwn(body, 'rating');
+  const hasAnswers = Object.hasOwn(body, 'answers');
+
+  if (hasRating === hasAnswers) {
+    return {
+      ok: false,
+      error: 'Submit either an overall rating or questionnaire answers',
+    };
+  }
+
+  if (hasRating) {
+    if (!hasOnlyKeys(body, ['orderId', 'rating'])) {
+      return { ok: false, error: 'Unexpected fields in rating submission' };
+    }
+    if (!isSurveyScore(body.rating)) {
+      return { ok: false, error: 'rating must be an integer from 1 to 5' };
+    }
+
+    return {
+      ok: true,
+      value: {
+        kind: 'rating',
+        orderId: body.orderId,
+        rating: body.rating,
+      },
+    };
+  }
+
+  if (!hasOnlyKeys(body, ['orderId', 'answers', 'comment'])) {
+    return {
+      ok: false,
+      error: 'Unexpected fields in questionnaire submission',
+    };
+  }
+
+  const questionnaire = validateQuestionnaire({
+    answers: body.answers,
+    comment: body.comment,
+  });
+  if (!questionnaire.ok) {
+    return questionnaire;
+  }
+
+  return {
+    ok: true,
+    value: {
+      kind: 'questionnaire',
+      orderId: body.orderId,
+      ...questionnaire.value,
+    },
+  };
+}
+
+function getSafeGoogleReviewUrl(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json().catch(() => null);
+    const validation = validateSubmission(body);
 
-    if (
-      !body ||
-      typeof body.orderId !== 'string' ||
-      body.orderId.length === 0 ||
-      typeof body.rating !== 'number' ||
-      !Number.isInteger(body.rating) ||
-      body.rating < 1 ||
-      body.rating > 5
-    ) {
-      return NextResponse.json(
-        { error: 'orderId (string) and rating (integer 1-5) are required' },
-        { status: 400 },
-      );
+    if (!validation.ok) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
     }
 
-    if (body.comment !== undefined && typeof body.comment !== 'string') {
-      return NextResponse.json(
-        { error: 'comment must be a string' },
-        { status: 400 },
-      );
-    }
-
-    const { orderId, rating, comment } = body as {
-      orderId: string;
-      rating: number;
-      comment?: string;
-    };
+    const minimumGoogleRating = getGoogleReviewMinimumRating();
+    const submission = validation.value;
+    const supabaseAdmin = getSupabaseAdmin();
 
     const { data: survey, error: surveyError } = await supabaseAdmin
       .from('surveys')
-      .select('id, location_id, customer_phone')
-      .eq('order_id', orderId)
+      .select(
+        'id, location_id, customer_phone, customer_name, services, rating, questionnaire_submitted_at',
+      )
+      .eq('order_id', submission.orderId)
       .maybeSingle();
 
     if (surveyError) {
@@ -54,21 +150,230 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Order not found' }, { status: 404 });
     }
 
-    const isFirstSubmit = comment === undefined;
-    const update: Record<string, unknown> = { rating };
-    if (isFirstSubmit) {
-      update.responded_at = new Date().toISOString();
-    } else {
-      update.comment = comment;
+    if (submission.kind === 'rating') {
+      if (survey.questionnaire_submitted_at) {
+        return NextResponse.json({ next: 'complete' });
+      }
+
+      const { data: updatedSurvey, error: updateError } = await supabaseAdmin
+        .from('surveys')
+        .update({
+          rating: submission.rating,
+          responded_at: new Date().toISOString(),
+        })
+        .eq('id', survey.id)
+        .is('questionnaire_submitted_at', null)
+        .select('id')
+        .maybeSingle();
+
+      if (updateError) {
+        console.error('[survey submit] rating update failed', updateError);
+        return NextResponse.json(
+          { error: 'Internal server error' },
+          { status: 500 },
+        );
+      }
+
+      // A questionnaire submission may have completed after the initial read.
+      // In that case its stored rating and answers remain authoritative.
+      if (!updatedSurvey) {
+        return NextResponse.json({ next: 'complete' });
+      }
+
+      if (
+        !shouldRouteToGoogleReview(submission.rating, minimumGoogleRating)
+      ) {
+        return NextResponse.json({ next: 'questionnaire' });
+      }
+
+      const { data: location, error: locationError } = await supabaseAdmin
+        .from('locations')
+        .select('google_review_url')
+        .eq('droptop_location_id', survey.location_id)
+        .maybeSingle();
+
+      if (locationError) {
+        console.error('[survey submit] location lookup failed', locationError);
+        return NextResponse.json(
+          { error: 'Internal server error' },
+          { status: 500 },
+        );
+      }
+
+      const googleReviewUrl = getSafeGoogleReviewUrl(
+        location?.google_review_url,
+      );
+      if (!googleReviewUrl) {
+        return NextResponse.json({ next: 'complete' });
+      }
+
+      return NextResponse.json({ next: 'google', url: googleReviewUrl });
     }
 
-    const { error: updateError } = await supabaseAdmin
+    if (survey.questionnaire_submitted_at) {
+      return NextResponse.json({ next: 'complete' });
+    }
+
+    if (survey.rating === null) {
+      return NextResponse.json(
+        { error: 'Submit an overall rating before the questionnaire' },
+        { status: 409 },
+      );
+    }
+
+    if (!isSurveyScore(survey.rating)) {
+      console.error('[survey submit] stored rating is invalid', survey.rating);
+      return NextResponse.json(
+        { error: 'Internal server error' },
+        { status: 500 },
+      );
+    }
+
+    if (shouldRouteToGoogleReview(survey.rating, minimumGoogleRating)) {
+      const { data: location, error: locationError } = await supabaseAdmin
+        .from('locations')
+        .select('google_review_url')
+        .eq('droptop_location_id', survey.location_id)
+        .maybeSingle();
+
+      if (locationError) {
+        console.error('[survey submit] location lookup failed', locationError);
+        return NextResponse.json(
+          { error: 'Internal server error' },
+          { status: 500 },
+        );
+      }
+
+      const googleReviewUrl = getSafeGoogleReviewUrl(
+        location?.google_review_url,
+      );
+      return googleReviewUrl
+        ? NextResponse.json({ next: 'google', url: googleReviewUrl })
+        : NextResponse.json({ next: 'complete' });
+    }
+
+    const update: Database['public']['Tables']['surveys']['Update'] = {
+      wait_time_score: submission.answers.waitTime,
+      service_speed_score: submission.answers.serviceSpeed,
+      vehicle_cleanliness_score: submission.answers.vehicleCleanliness,
+      additional_services_experience_score:
+        submission.answers.additionalServicesExperience,
+      value_score: submission.answers.value,
+      team_friendliness_score: submission.answers.teamFriendliness,
+      questionnaire_version: QUESTIONNAIRE_VERSION,
+      questionnaire_submitted_at: new Date().toISOString(),
+      comment: submission.comment,
+    };
+
+    const { data: completedSurvey, error: updateError } = await supabaseAdmin
       .from('surveys')
       .update(update)
-      .eq('order_id', orderId);
+      .eq('id', survey.id)
+      .is('questionnaire_submitted_at', null)
+      .lt('rating', minimumGoogleRating)
+      .select(
+        'id, rating, location_id, customer_phone, customer_name, services',
+      )
+      .maybeSingle();
 
     if (updateError) {
-      console.error('[survey submit] survey update failed', updateError);
+      console.error('[survey submit] questionnaire update failed', updateError);
+      return NextResponse.json(
+        { error: 'Internal server error' },
+        { status: 500 },
+      );
+    }
+
+    // A concurrent request may have completed the questionnaire or changed the
+    // routing rating after our initial read. Re-read instead of treating every
+    // zero-row result as a completed duplicate.
+    if (!completedSurvey) {
+      const { data: currentSurvey, error: currentSurveyError } =
+        await supabaseAdmin
+          .from('surveys')
+          .select('rating, questionnaire_submitted_at, location_id')
+          .eq('id', survey.id)
+          .maybeSingle();
+
+      if (currentSurveyError) {
+        console.error(
+          '[survey submit] survey race re-check failed',
+          currentSurveyError,
+        );
+        return NextResponse.json(
+          { error: 'Internal server error' },
+          { status: 500 },
+        );
+      }
+
+      if (!currentSurvey) {
+        return NextResponse.json({ error: 'Order not found' }, { status: 404 });
+      }
+
+      if (currentSurvey.questionnaire_submitted_at) {
+        return NextResponse.json({ next: 'complete' });
+      }
+
+      if (currentSurvey.rating === null) {
+        return NextResponse.json(
+          { error: 'Submit an overall rating before the questionnaire' },
+          { status: 409 },
+        );
+      }
+
+      if (!isSurveyScore(currentSurvey.rating)) {
+        console.error(
+          '[survey submit] stored rating is invalid',
+          currentSurvey.rating,
+        );
+        return NextResponse.json(
+          { error: 'Internal server error' },
+          { status: 500 },
+        );
+      }
+
+      if (
+        shouldRouteToGoogleReview(
+          currentSurvey.rating,
+          minimumGoogleRating,
+        )
+      ) {
+        const { data: location, error: locationError } = await supabaseAdmin
+          .from('locations')
+          .select('google_review_url')
+          .eq('droptop_location_id', currentSurvey.location_id)
+          .maybeSingle();
+
+        if (locationError) {
+          console.error(
+            '[survey submit] location lookup failed',
+            locationError,
+          );
+          return NextResponse.json(
+            { error: 'Internal server error' },
+            { status: 500 },
+          );
+        }
+
+        const googleReviewUrl = getSafeGoogleReviewUrl(
+          location?.google_review_url,
+        );
+        return googleReviewUrl
+          ? NextResponse.json({ next: 'google', url: googleReviewUrl })
+          : NextResponse.json({ next: 'complete' });
+      }
+
+      return NextResponse.json(
+        { error: 'Survey response changed; please try again' },
+        { status: 409 },
+      );
+    }
+
+    if (!isSurveyScore(completedSurvey.rating)) {
+      console.error(
+        '[survey submit] stored rating is invalid',
+        completedSurvey.rating,
+      );
       return NextResponse.json(
         { error: 'Internal server error' },
         { status: 500 },
@@ -77,36 +382,31 @@ export async function POST(request: NextRequest) {
 
     const { data: location, error: locationError } = await supabaseAdmin
       .from('locations')
-      .select('name, google_review_url')
-      .eq('droptop_location_id', survey.location_id)
+      .select('name')
+      .eq('droptop_location_id', completedSurvey.location_id)
       .maybeSingle();
 
     if (locationError) {
       console.error('[survey submit] location lookup failed', locationError);
     }
 
-    if (rating >= 3) {
-      return NextResponse.json({
-        redirectUrl: location?.google_review_url || FALLBACK_GOOGLE_URL,
+    try {
+      await sendPrivateFeedbackEmail({
+        orderId: submission.orderId,
+        rating: completedSurvey.rating,
+        answers: submission.answers,
+        comment: submission.comment,
+        locationId: completedSurvey.location_id,
+        locationName: location?.name,
+        customerName: completedSurvey.customer_name ?? undefined,
+        customerPhone: completedSurvey.customer_phone ?? undefined,
+        services: completedSurvey.services,
       });
+    } catch (emailError) {
+      console.error('[survey submit] email send failed', emailError);
     }
 
-    if (comment) {
-      try {
-        await sendNegativeFeedbackEmail({
-          orderId,
-          rating,
-          comment,
-          locationId: survey.location_id,
-          locationName: location?.name,
-          customerPhone: survey.customer_phone ?? undefined,
-        });
-      } catch (emailError) {
-        console.error('[survey submit] email send failed', emailError);
-      }
-    }
-
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ next: 'complete' });
   } catch (error) {
     console.error('[survey submit] unexpected error', error);
     return NextResponse.json(

@@ -1,21 +1,34 @@
 'use client';
 
 import Image from 'next/image';
-import { useState } from 'react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
+import {
+  MAX_COMMENT_LENGTH,
+  QUESTIONNAIRE_ITEMS,
+  type QuestionnaireAnswers,
+  type QuestionnaireKey,
+  type SurveyScore,
+} from '@/lib/questionnaire';
 
-type Rating = 1 | 2 | 3 | 4 | 5;
-type Stage = 'rating' | 'comment' | 'done';
+type Stage = 'rating' | 'questionnaire' | 'done';
 
-type SubmitPayload = {
+type RatingPayload = {
   orderId: string;
-  rating: Rating;
+  rating: SurveyScore;
+};
+
+type QuestionnairePayload = {
+  orderId: string;
+  answers: QuestionnaireAnswers;
   comment?: string;
 };
 
-type SubmitResponse = {
-  redirectUrl?: string;
-  ok?: boolean;
-};
+type SubmitPayload = RatingPayload | QuestionnairePayload;
+
+type SubmitResponse =
+  | { next: 'questionnaire' }
+  | { next: 'google'; url: string }
+  | { next: 'complete' };
 
 const STAR_PATH =
   'M12 2.5l2.92 6.49 7.08.62-5.36 4.7 1.6 6.94L12 17.77l-6.24 3.48 1.6-6.94L2 9.61l7.08-.62L12 2.5z';
@@ -23,20 +36,65 @@ const STAR_PATH =
 const BRAND_RED = '#C8102E';
 const BRAND_BLUE = '#2c3e8c';
 const BRAND_YELLOW = '#FFD700';
+const SCORES: SurveyScore[] = [1, 2, 3, 4, 5];
 
 type SurveyPageProps = {
   params: { orderId: string };
 };
 
+function isSubmitResponse(value: unknown): value is SubmitResponse {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  const response = value as { next?: unknown; url?: unknown };
+  if (response.next === 'questionnaire' || response.next === 'complete') {
+    return true;
+  }
+
+  return response.next === 'google' && typeof response.url === 'string';
+}
+
+function getSafeReviewUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function navigateToReview(url: string) {
+  const link = document.createElement('a');
+  link.href = url;
+  link.target = '_self';
+  link.rel = 'noopener noreferrer';
+  link.click();
+}
+
 export default function SurveyPage({ params }: SurveyPageProps) {
   const orderId = params.orderId;
 
-  const [rating, setRating] = useState<Rating | null>(null);
-  const [hover, setHover] = useState<Rating | null>(null);
+  const [rating, setRating] = useState<SurveyScore | null>(null);
+  const [hover, setHover] = useState<SurveyScore | null>(null);
   const [stage, setStage] = useState<Stage>('rating');
+  const [answers, setAnswers] = useState<Partial<QuestionnaireAnswers>>({});
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [missingQuestion, setMissingQuestion] =
+    useState<QuestionnaireKey | null>(null);
+  const submissionInFlight = useRef(false);
+  const stageHeading = useRef<HTMLHeadingElement>(null);
+  const firstScoreInputs = useRef<
+    Partial<Record<QuestionnaireKey, HTMLInputElement>>
+  >({});
+
+  useEffect(() => {
+    if (stage !== 'rating') {
+      stageHeading.current?.focus();
+    }
+  }, [stage]);
 
   if (!orderId) {
     return (
@@ -57,46 +115,89 @@ export default function SurveyPage({ params }: SurveyPageProps) {
   }
 
   async function submit(payload: SubmitPayload): Promise<SubmitResponse> {
+    submissionInFlight.current = true;
     setSubmitting(true);
     setError(null);
+
     try {
-      const res = await fetch('/api/survey/submit', {
+      const response = await fetch('/api/survey/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error('Submission failed');
-      return (await res.json()) as SubmitResponse;
+
+      if (!response.ok) {
+        throw new Error('Submission failed');
+      }
+
+      const data: unknown = await response.json();
+      if (!isSubmitResponse(data)) {
+        throw new Error('Unexpected submission response');
+      }
+
+      return data;
     } finally {
+      submissionInFlight.current = false;
       setSubmitting(false);
     }
   }
 
-  async function handleRatingSubmit() {
-    if (rating === null) return;
-    try {
-      const data = await submit({ orderId, rating });
-      if (data.redirectUrl) {
+  function handleNextStep(response: SubmitResponse) {
+    if (response.next === 'questionnaire') {
+      setStage('questionnaire');
+      return;
+    }
+
+    if (response.next === 'google') {
+      const safeUrl = getSafeReviewUrl(response.url);
+      if (safeUrl) {
+        submissionInFlight.current = true;
         setSubmitting(true);
-        window.location.href = data.redirectUrl;
+        navigateToReview(safeUrl);
         return;
       }
-      setStage('comment');
+    }
+
+    setStage('done');
+  }
+
+  async function handleRatingSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (rating === null || submissionInFlight.current) return;
+
+    try {
+      const response = await submit({ orderId, rating });
+      handleNextStep(response);
     } catch {
       setError('Something went wrong. Please try again.');
     }
   }
 
-  async function handleCommentSubmit() {
-    if (rating === null) return;
-    const trimmed = comment.trim();
+  async function handleQuestionnaireSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (submissionInFlight.current) return;
+
+    const firstMissing = QUESTIONNAIRE_ITEMS.find(
+      (item) => answers[item.key] === undefined,
+    );
+
+    if (firstMissing) {
+      setMissingQuestion(firstMissing.key);
+      setError('Please answer all six questions before submitting.');
+      firstScoreInputs.current[firstMissing.key]?.focus();
+      return;
+    }
+
+    const completeAnswers = answers as QuestionnaireAnswers;
+    const trimmedComment = comment.trim();
+
     try {
-      await submit({
+      const response = await submit({
         orderId,
-        rating,
-        ...(trimmed ? { comment: trimmed } : {}),
+        answers: completeAnswers,
+        ...(trimmedComment ? { comment: trimmedComment } : {}),
       });
-      setStage('done');
+      handleNextStep(response);
     } catch {
       setError('Something went wrong. Please try again.');
     }
@@ -106,11 +207,17 @@ export default function SurveyPage({ params }: SurveyPageProps) {
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-gradient-to-b from-white to-gray-50 px-4 py-12">
-      <div className="w-full max-w-md rounded-2xl border border-gray-100 bg-white p-8 shadow-sm sm:p-10">
+      <div
+        className={`w-full rounded-2xl border border-gray-100 bg-white shadow-sm ${
+          stage === 'questionnaire'
+            ? 'max-w-2xl p-6 sm:p-10'
+            : 'max-w-md p-8 sm:p-10'
+        }`}
+      >
         <Wordmark />
 
         {stage === 'rating' && (
-          <>
+          <form onSubmit={handleRatingSubmit}>
             <div className="mt-8 text-center">
               <h2 className="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">
                 How was your oil change?
@@ -124,17 +231,17 @@ export default function SurveyPage({ params }: SurveyPageProps) {
               className="mt-8 flex justify-center gap-1 sm:gap-2"
               onMouseLeave={() => setHover(null)}
             >
-              {([1, 2, 3, 4, 5] as Rating[]).map((n) => {
-                const filled = n <= activeStarCount;
+              {SCORES.map((score) => {
+                const filled = score <= activeStarCount;
                 return (
                   <button
-                    key={n}
+                    key={score}
                     type="button"
-                    aria-label={`Rate ${n} star${n === 1 ? '' : 's'}`}
-                    aria-pressed={rating === n}
-                    onClick={() => setRating(n)}
-                    onMouseEnter={() => setHover(n)}
-                    onFocus={() => setHover(n)}
+                    aria-label={`Rate ${score} star${score === 1 ? '' : 's'}`}
+                    aria-pressed={rating === score}
+                    onClick={() => setRating(score)}
+                    onMouseEnter={() => setHover(score)}
+                    onFocus={() => setHover(score)}
                     onBlur={() => setHover(null)}
                     className="rounded-full p-2 transition-transform hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
                     style={{
@@ -164,8 +271,7 @@ export default function SurveyPage({ params }: SurveyPageProps) {
             </div>
 
             <button
-              type="button"
-              onClick={handleRatingSubmit}
+              type="submit"
               disabled={rating === null || submitting}
               className="mt-8 w-full rounded-xl px-6 py-4 text-base font-semibold text-white shadow-sm transition-colors disabled:cursor-not-allowed disabled:bg-gray-300"
               style={{
@@ -181,35 +287,128 @@ export default function SurveyPage({ params }: SurveyPageProps) {
                 {error}
               </p>
             )}
-          </>
+          </form>
         )}
 
-        {stage === 'comment' && (
-          <div className="mt-8">
-            <h2 className="text-xl font-bold tracking-tight text-gray-900 sm:text-2xl">
-              We&apos;re sorry to hear that.
-            </h2>
-            <label
-              htmlFor="comment"
-              className="mt-3 block text-sm text-gray-600"
+        {stage === 'questionnaire' && (
+          <form className="mt-8" onSubmit={handleQuestionnaireSubmit} noValidate>
+            <h2
+              ref={stageHeading}
+              tabIndex={-1}
+              className="text-2xl font-bold tracking-tight text-gray-900 outline-none sm:text-3xl"
             >
-              Tell us what went wrong:
-            </label>
-            <textarea
-              id="comment"
-              rows={4}
-              value={comment}
-              onChange={(e) => setComment(e.target.value)}
-              className="mt-2 w-full rounded-xl border border-gray-200 p-3 text-base text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2"
-              style={{
-                ['--tw-ring-color' as string]: BRAND_BLUE,
-              }}
-              placeholder="Your feedback..."
-            />
+              Tell us about your visit
+            </h2>
+            <p className="mt-2 text-sm text-gray-600">
+              Please answer all six questions. For every question, 1 is poor
+              and 5 is excellent.
+            </p>
+
+            <div className="mt-8 space-y-8">
+              {QUESTIONNAIRE_ITEMS.map((item, itemIndex) => (
+                <fieldset
+                  key={item.key}
+                  aria-describedby={`${item.key}-scale`}
+                  className="rounded-xl border border-gray-200 p-4 sm:p-5"
+                >
+                  <legend className="px-1 text-base font-semibold text-gray-900">
+                    {itemIndex + 1}. {item.label}
+                  </legend>
+                  <div className="mt-4 grid grid-cols-5 gap-2 sm:gap-3">
+                    {SCORES.map((score) => {
+                      const inputId = `${item.key}-${score}`;
+                      return (
+                        <div key={score} className="relative">
+                          <input
+                            ref={(input) => {
+                              if (score === 1 && input) {
+                                firstScoreInputs.current[item.key] = input;
+                              }
+                            }}
+                            id={inputId}
+                            type="radio"
+                            name={item.key}
+                            value={score}
+                            checked={answers[item.key] === score}
+                            required
+                            aria-invalid={
+                              missingQuestion === item.key ? true : undefined
+                            }
+                            onChange={() => {
+                              setAnswers((current) => ({
+                                ...current,
+                                [item.key]: score,
+                              }));
+                              if (missingQuestion === item.key) {
+                                setMissingQuestion(null);
+                                setError(null);
+                              }
+                            }}
+                            className="peer sr-only"
+                          />
+                          <label
+                            htmlFor={inputId}
+                            className="flex min-h-12 cursor-pointer items-center justify-center rounded-lg border border-gray-300 bg-white text-base font-semibold text-gray-700 transition-colors hover:border-gray-400 peer-checked:border-transparent peer-checked:text-white peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2"
+                            style={{
+                              backgroundColor:
+                                answers[item.key] === score
+                                  ? BRAND_BLUE
+                                  : undefined,
+                              ['--tw-outline-color' as string]: BRAND_BLUE,
+                            }}
+                          >
+                            {score}
+                          </label>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p
+                    id={`${item.key}-scale`}
+                    className="mt-2 flex justify-between text-xs font-medium text-gray-500"
+                  >
+                    <span>1 = Poor</span>
+                    <span>5 = Excellent</span>
+                  </p>
+                </fieldset>
+              ))}
+            </div>
+
+            <div className="mt-8">
+              <label
+                htmlFor="comment"
+                className="block text-base font-semibold text-gray-900"
+              >
+                Anything we can improve?{' '}
+                <span className="font-normal text-gray-500">(optional)</span>
+              </label>
+              <textarea
+                id="comment"
+                rows={5}
+                value={comment}
+                maxLength={MAX_COMMENT_LENGTH}
+                aria-describedby="comment-count"
+                onChange={(event) =>
+                  setComment(event.target.value.slice(0, MAX_COMMENT_LENGTH))
+                }
+                className="mt-2 w-full rounded-xl border border-gray-200 p-3 text-base text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2"
+                style={{
+                  ['--tw-ring-color' as string]: BRAND_BLUE,
+                }}
+                placeholder="Share any additional feedback…"
+              />
+              <p
+                id="comment-count"
+                className="mt-1 text-right text-xs text-gray-500"
+                aria-live="polite"
+              >
+                {comment.length.toLocaleString()} /{' '}
+                {MAX_COMMENT_LENGTH.toLocaleString()} characters
+              </p>
+            </div>
 
             <button
-              type="button"
-              onClick={handleCommentSubmit}
+              type="submit"
               disabled={submitting}
               className="mt-6 w-full rounded-xl px-6 py-4 text-base font-semibold text-white shadow-sm transition-colors disabled:cursor-not-allowed disabled:bg-gray-300"
               style={{
@@ -224,7 +423,7 @@ export default function SurveyPage({ params }: SurveyPageProps) {
                 {error}
               </p>
             )}
-          </div>
+          </form>
         )}
 
         {stage === 'done' && (
@@ -246,7 +445,11 @@ export default function SurveyPage({ params }: SurveyPageProps) {
                 <path d="M5 12l5 5L20 7" />
               </svg>
             </div>
-            <h2 className="mt-5 text-2xl font-bold tracking-tight text-gray-900">
+            <h2
+              ref={stageHeading}
+              tabIndex={-1}
+              className="mt-5 text-2xl font-bold tracking-tight text-gray-900 outline-none"
+            >
               Thank you for your feedback
             </h2>
             <p className="mt-2 text-sm text-gray-500">

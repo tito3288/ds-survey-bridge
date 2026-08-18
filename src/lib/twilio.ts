@@ -1,11 +1,20 @@
+import 'server-only';
+
 import twilio from 'twilio';
+import { getRequiredEnv } from '@/lib/env';
 
-const accountSid = process.env.TWILIO_ACCOUNT_SID!;
-const authToken = process.env.TWILIO_AUTH_TOKEN!;
+let twilioClient: ReturnType<typeof twilio> | undefined;
 
-export const twilioClient = twilio(accountSid, authToken);
+function getTwilioClient(): ReturnType<typeof twilio> {
+  if (!twilioClient) {
+    twilioClient = twilio(
+      getRequiredEnv('TWILIO_ACCOUNT_SID'),
+      getRequiredEnv('TWILIO_AUTH_TOKEN'),
+    );
+  }
 
-export const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER!;
+  return twilioClient;
+}
 
 export async function sendSurveySMS(params: {
   to: string;
@@ -19,12 +28,12 @@ export async function sendSurveySMS(params: {
       ? `Hi ${customerName.trim()}!`
       : 'Hi there!';
 
-  const surveyUrl = `${process.env.APP_URL}/survey/${orderId}`;
+  const surveyUrl = `${getRequiredEnv('APP_URL')}/survey/${orderId}`;
   const body = `${greeting} Thanks for visiting Drive & Shine today. How was your oil change? Tap to rate: ${surveyUrl} — Drive & Shine`;
 
-  const message = await twilioClient.messages.create({
+  const message = await getTwilioClient().messages.create({
     body,
-    from: twilioPhoneNumber,
+    from: getRequiredEnv('TWILIO_PHONE_NUMBER'),
     to,
   });
 

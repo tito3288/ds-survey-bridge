@@ -9,6 +9,10 @@
 # testing
 /coverage
 
+# supabase local state
+/supabase/.branches/
+/supabase/.temp/
+
 # next.js
 /.next/
 /out/
