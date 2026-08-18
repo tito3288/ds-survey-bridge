@@ -9,17 +9,70 @@ export type Json =
 export type Database = {
   public: {
     Tables: {
+      delivery_events: {
+        Row: {
+          delivery_job_id: string
+          event_type: Database["public"]["Enums"]["delivery_event_type"]
+          id: string
+          occurred_at: string
+          provider: Database["public"]["Enums"]["delivery_provider"]
+          provider_code: string | null
+          provider_event_key: string
+          provider_message_id: string
+          received_at: string
+        }
+        Insert: {
+          delivery_job_id: string
+          event_type: Database["public"]["Enums"]["delivery_event_type"]
+          id?: string
+          occurred_at: string
+          provider: Database["public"]["Enums"]["delivery_provider"]
+          provider_code?: string | null
+          provider_event_key: string
+          provider_message_id: string
+          received_at: string
+        }
+        Update: {
+          delivery_job_id?: string
+          event_type?: Database["public"]["Enums"]["delivery_event_type"]
+          id?: string
+          occurred_at?: string
+          provider?: Database["public"]["Enums"]["delivery_provider"]
+          provider_code?: string | null
+          provider_event_key?: string
+          provider_message_id?: string
+          received_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "delivery_events_delivery_job_id_fkey"
+            columns: ["delivery_job_id"]
+            isOneToOne: false
+            referencedRelation: "delivery_jobs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       delivery_jobs: {
         Row: {
           accepted_at: string | null
           attempt_count: number
           claimed_by_run_id: string | null
+          complained_at: string | null
           created_at: string
+          delayed_at: string | null
+          delivered_at: string | null
+          downstream_status:
+            | Database["public"]["Enums"]["delivery_downstream_status"]
+            | null
+          downstream_status_at: string | null
+          failed_at: string | null
           first_provider_call_started_at: string | null
           id: string
           kind: Database["public"]["Enums"]["delivery_job_kind"]
           last_error_category: string | null
           last_error_code: string | null
+          last_reconciled_at: string | null
           lease_expires_at: string | null
           lease_token: string | null
           next_attempt_at: string
@@ -34,12 +87,21 @@ export type Database = {
           accepted_at?: string | null
           attempt_count?: number
           claimed_by_run_id?: string | null
+          complained_at?: string | null
           created_at?: string
+          delayed_at?: string | null
+          delivered_at?: string | null
+          downstream_status?:
+            | Database["public"]["Enums"]["delivery_downstream_status"]
+            | null
+          downstream_status_at?: string | null
+          failed_at?: string | null
           first_provider_call_started_at?: string | null
           id?: string
           kind: Database["public"]["Enums"]["delivery_job_kind"]
           last_error_category?: string | null
           last_error_code?: string | null
+          last_reconciled_at?: string | null
           lease_expires_at?: string | null
           lease_token?: string | null
           next_attempt_at: string
@@ -54,12 +116,21 @@ export type Database = {
           accepted_at?: string | null
           attempt_count?: number
           claimed_by_run_id?: string | null
+          complained_at?: string | null
           created_at?: string
+          delayed_at?: string | null
+          delivered_at?: string | null
+          downstream_status?:
+            | Database["public"]["Enums"]["delivery_downstream_status"]
+            | null
+          downstream_status_at?: string | null
+          failed_at?: string | null
           first_provider_call_started_at?: string | null
           id?: string
           kind?: Database["public"]["Enums"]["delivery_job_kind"]
           last_error_category?: string | null
           last_error_code?: string | null
+          last_reconciled_at?: string | null
           lease_expires_at?: string | null
           lease_token?: string | null
           next_attempt_at?: string
@@ -239,6 +310,25 @@ export type Database = {
           survey_token: string
         }[]
       }
+      get_delivery_health_summary: {
+        Args: { p_now: string }
+        Returns: {
+          complained_count: number
+          dead_count: number
+          failed_count: number
+          mixed_count: number
+          overdue_count: number
+          stale_count: number
+          unknown_count: number
+        }[]
+      }
+      get_twilio_reconciliation_candidates: {
+        Args: { p_limit: number; p_now: string }
+        Returns: {
+          delivery_job_id: string
+          provider_message_id: string
+        }[]
+      }
       mark_delivery_job_dead: {
         Args: {
           p_error_category: string
@@ -289,8 +379,41 @@ export type Database = {
         }
         Returns: boolean
       }
+      purge_delivery_events: {
+        Args: { p_limit: number; p_now: string }
+        Returns: number
+      }
+      record_delivery_event: {
+        Args: {
+          p_delivery_job_id: string
+          p_event_type: Database["public"]["Enums"]["delivery_event_type"]
+          p_occurred_at: string
+          p_provider: Database["public"]["Enums"]["delivery_provider"]
+          p_provider_code: string
+          p_provider_event_key: string
+          p_provider_message_id: string
+          p_received_at: string
+        }
+        Returns: {
+          downstream_status: Database["public"]["Enums"]["delivery_downstream_status"]
+          job_status: Database["public"]["Enums"]["delivery_job_status"]
+          outcome: string
+        }[]
+      }
     }
     Enums: {
+      delivery_downstream_status:
+        | "delivered"
+        | "delayed"
+        | "failed"
+        | "mixed"
+        | "complained"
+      delivery_event_type:
+        | "accepted"
+        | "delivered"
+        | "delayed"
+        | "failed"
+        | "complained"
       delivery_job_kind: "survey_sms" | "private_feedback_email"
       delivery_job_status:
         | "pending"
@@ -298,6 +421,7 @@ export type Database = {
         | "sent"
         | "dead"
         | "unknown"
+      delivery_provider: "twilio" | "resend"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -425,8 +549,23 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      delivery_downstream_status: [
+        "delivered",
+        "delayed",
+        "failed",
+        "mixed",
+        "complained",
+      ],
+      delivery_event_type: [
+        "accepted",
+        "delivered",
+        "delayed",
+        "failed",
+        "complained",
+      ],
       delivery_job_kind: ["survey_sms", "private_feedback_email"],
       delivery_job_status: ["pending", "processing", "sent", "dead", "unknown"],
+      delivery_provider: ["twilio", "resend"],
     },
   },
 } as const

@@ -66,4 +66,17 @@ describe('survey privacy headers', () => {
       'x-content-type-options': 'nosniff',
     });
   });
+
+  it('prevents provider webhook responses from being cached or MIME-sniffed', async () => {
+    const rules = await getHeaderRules();
+    const webhookRule = rules.find(
+      (rule) => rule.source === '/api/webhooks/:path*',
+    );
+
+    expect(webhookRule).toBeDefined();
+    expect(asHeaderMap(webhookRule!)).toMatchObject({
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    });
+  });
 });

@@ -27,6 +27,13 @@ const nextConfig = {
           { key: 'X-Content-Type-Options', value: 'nosniff' },
         ],
       },
+      {
+        source: '/api/webhooks/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'no-store' },
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+        ],
+      },
     ];
   },
 };

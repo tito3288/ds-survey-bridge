@@ -122,18 +122,82 @@ An SMS with an uncertain provider outcome becomes `unknown` and is not retried,
 avoiding a possible duplicate customer text. Private emails use a stable Resend
 idempotency key so uncertain attempts can retry safely.
 
-The queue's `sent` state means the provider accepted the request. Carrier SMS
-and recipient-inbox delivery callbacks are intentionally deferred to Batch 6.
+The queue's `sent` state means the provider accepted the request. It does not
+mean that a text reached a handset or that an email reached an inbox.
 Worker logs contain delivery identifiers and sanitized outcome codes only, not
 customer contact details, answers, comments, or raw provider errors.
 
+## Verified provider delivery tracking
+
+Batch 6 adds signed provider callbacks without changing the customer flow or
+automatically resending accepted messages:
+
+- Twilio posts form-encoded message status updates to
+  `/api/webhooks/twilio/message-status/{deliveryJobId}`. The service verifies
+  `X-Twilio-Signature` against the exact public callback URL and parameters.
+- Resend posts email events to `/api/webhooks/resend/delivery`. The service
+  verifies the exact raw body with `svix-id`, `svix-timestamp`,
+  `svix-signature`, and `RESEND_WEBHOOK_SECRET`.
+
+Subscribe that Resend endpoint only to `email.sent`, `email.delivered`,
+`email.delivery_delayed`, `email.complained`, `email.bounced`, `email.failed`,
+and `email.suppressed`. Do not subscribe it to opened or clicked events. The
+web app needs the Resend webhook signing secret, but the send-capable
+`RESEND_API_KEY` remains isolated to the private delivery worker.
+
+Only normalized provider evidence and sanitized error codes are retained.
+Callback receipts never store raw payloads, message bodies, recipients,
+customer data, survey answers, or comments. Twilio statuses are protected from
+out-of-order regression. Resend emits one event per recipient; the system keeps
+privacy-minimal job-level evidence, records success plus failure as `mixed`,
+and treats complaints as authoritative. A Resend `delivered` event means the
+recipient's mail server accepted the message, not that a person received or
+read it.
+
+Three disabled-by-default, run-to-exit commands provide private operational
+checks without an admin dashboard or public endpoint:
+
+```bash
+npm run ops:delivery-health
+npm run ops:twilio-reconcile
+npm run ops:delivery-events-cleanup
+```
+
+Each command requires its matching environment flag. The health command prints
+aggregate-only counts and exits nonzero when attention is needed. Twilio
+reconciliation polls messages that were provider-accepted at least 12 hours
+earlier but have no final callback; each poll is atomically watermarked so
+concurrent runs cannot poll the same message and a nonterminal message is not
+eligible again for 12 hours. It records the observed status and never resends a
+text. Cleanup deletes only callback receipts older than 90 days in a bounded
+batch. Survey records, delivery jobs, and their normalized final state are not
+deleted.
+
+Health counts are deliberately cumulative in this local foundation: a dead or
+uncertain job, downstream failure, mixed recipient outcome, or complaint keeps
+the command nonzero instead of silently clearing itself. Use the command as a
+manual aggregate check in Batch 6. Before scheduling it in production, Batch 7
+must define the responsible operator and a separate acknowledgement/remediation
+policy that preserves the historical delivery evidence.
+
+Production activation still requires the final HTTPS `APP_URL` so each outgoing
+Twilio message receives the correct callback URL, registering the Resend
+endpoint and signing secret, replacing the temporary `onboarding@resend.dev`
+sender with an approved address on a verified Drive & Shine domain, and
+enabling separately scheduled operational services. See Twilio's
+[message-status](https://www.twilio.com/docs/messaging/guides/track-outbound-message-status)
+and [signature-verification](https://www.twilio.com/docs/usage/webhooks/webhooks-security)
+guidance and Resend's
+[webhook-verification](https://resend.com/docs/webhooks/verify-webhooks-requests)
+documentation. None of those hosted-provider or Railway steps occur here.
+
 ## Deployment boundary
 
-Batches 1-5 change the application, local database foundation, documentation,
-and automated tests only. Batch 5 moves provider work into a durable queue and
-adds the disabled worker command, but does not create a Railway cron service,
-deploy to Railway, migrate hosted Supabase, change SMS wording, alter the
-provisional DropTop payload, change recipients, location mappings, or
-questionnaire routing, or replace provider integrations. A hosted database
-backup and schema verification are required before the later controlled
-production migration.
+Batches 1-6 change the application, local database foundation, documentation,
+and automated tests only. Batch 5 moves provider work into a durable queue;
+Batch 6 adds signed callback and disabled operational commands. Neither batch
+creates Railway services, registers live callbacks, deploys to Railway,
+migrates hosted Supabase, changes SMS wording, alters the provisional DropTop
+payload, changes recipients, location mappings, questionnaire routing, or
+provider vendors. A hosted database backup and schema verification are required
+before the later controlled production migration.

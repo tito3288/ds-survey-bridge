@@ -1,0 +1,110 @@
+-- Fictional queue rows created after migration 004 and before verified
+-- callback tracking exists. Migration 005 must preserve them without inventing
+-- downstream delivery evidence.
+
+insert into public.surveys (
+  id,
+  order_id,
+  location_id,
+  customer_phone,
+  sent_at,
+  rating,
+  created_at
+)
+values
+  (
+    '00000000-0000-4000-8000-000000000091',
+    'FAKE-PRE-005-SENT-SMS',
+    'FAKE-PRE-005-LOCATION',
+    '+13175550191',
+    '2026-02-01T12:00:05Z',
+    null,
+    '2026-02-01T11:59:00Z'
+  ),
+  (
+    '00000000-0000-4000-8000-000000000092',
+    'FAKE-PRE-005-UNKNOWN-SMS',
+    'FAKE-PRE-005-LOCATION',
+    '+13175550192',
+    null,
+    null,
+    '2026-02-02T11:59:00Z'
+  ),
+  (
+    '00000000-0000-4000-8000-000000000093',
+    'FAKE-PRE-005-SENT-EMAIL',
+    'FAKE-PRE-005-LOCATION',
+    '+13175550193',
+    null,
+    2,
+    '2026-02-03T11:59:00Z'
+  );
+insert into public.delivery_jobs (
+  id,
+  survey_id,
+  kind,
+  status,
+  scheduled_at,
+  next_attempt_at,
+  attempt_count,
+  first_provider_call_started_at,
+  provider_call_started_at,
+  provider_message_id,
+  accepted_at,
+  last_error_category,
+  last_error_code,
+  created_at,
+  updated_at
+)
+values
+  (
+    '50000000-0000-4000-8000-000000000091',
+    '00000000-0000-4000-8000-000000000091',
+    'survey_sms',
+    'sent',
+    '2026-02-01T12:00:00Z',
+    '2026-02-01T12:00:00Z',
+    1,
+    '2026-02-01T12:00:01Z',
+    '2026-02-01T12:00:01Z',
+    'FAKE-PRE-005-TWILIO-SID',
+    '2026-02-01T12:00:05Z',
+    null,
+    null,
+    '2026-02-01T12:00:00Z',
+    '2026-02-01T12:00:05Z'
+  ),
+  (
+    '50000000-0000-4000-8000-000000000092',
+    '00000000-0000-4000-8000-000000000092',
+    'survey_sms',
+    'unknown',
+    '2026-02-02T12:00:00Z',
+    '2026-02-02T12:00:00Z',
+    1,
+    '2026-02-02T12:00:01Z',
+    '2026-02-02T12:00:01Z',
+    null,
+    null,
+    'uncertain_provider_outcome',
+    'connection_lost',
+    '2026-02-02T12:00:00Z',
+    '2026-02-02T12:00:05Z'
+  ),
+  (
+    '50000000-0000-4000-8000-000000000093',
+    '00000000-0000-4000-8000-000000000093',
+    'private_feedback_email',
+    'sent',
+    '2026-02-03T12:00:00Z',
+    '2026-02-03T12:00:00Z',
+    1,
+    '2026-02-03T12:00:01Z',
+    '2026-02-03T12:00:01Z',
+    'FAKE-PRE-005-RESEND-ID',
+    '2026-02-03T12:00:05Z',
+    null,
+    null,
+    '2026-02-03T12:00:00Z',
+    '2026-02-03T12:00:05Z'
+  );

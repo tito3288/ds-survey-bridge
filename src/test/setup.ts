@@ -12,7 +12,11 @@ const fakeProviderEnvironment = {
   TWILIO_PHONE_NUMBER: '+15555550100',
   SURVEY_SMS_DELAY_MINUTES: '0',
   DELIVERY_WORKER_ENABLED: 'false',
+  DELIVERY_HEALTH_ENABLED: 'false',
+  DELIVERY_RECONCILER_ENABLED: 'false',
+  DELIVERY_EVENT_CLEANUP_ENABLED: 'false',
   RESEND_API_KEY: 're_fake_local_key',
+  RESEND_WEBHOOK_SECRET: 'whsec_fake_local_webhook_secret',
   SUPPORT_EMAIL: 'support@example.test',
 } as const;
 

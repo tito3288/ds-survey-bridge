@@ -206,6 +206,7 @@ export function createDeliveryProviders(
             to: payload.customerPhone,
             customerName: payload.customerName,
             surveyToken: payload.surveyToken,
+            deliveryJobId: jobId,
           });
 
           if (!providerMessageId) {
@@ -237,6 +238,7 @@ export function createDeliveryProviders(
           },
           {
             idempotencyKey: `private-feedback/${jobId}`,
+            deliveryJobId: jobId,
             ...(signal ? { signal } : {}),
           },
         );

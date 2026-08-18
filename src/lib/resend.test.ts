@@ -175,4 +175,38 @@ describe('sendPrivateFeedbackEmail', () => {
       { idempotencyKey: 'private-feedback/job-123' },
     );
   });
+
+  it('adds only non-PII application and delivery-job tags for callback correlation', async () => {
+    const { sendPrivateFeedbackEmail } = await import('./resend');
+    const deliveryJobId = '20000000-0000-4000-8000-000000000123';
+
+    await sendPrivateFeedbackEmail(
+      {
+        orderId: 'ORDER-TAGGED',
+        rating: 2,
+        answers,
+        customerPhone: '+15555550123',
+      },
+      {
+        idempotencyKey: `private-feedback/${deliveryJobId}`,
+        deliveryJobId,
+      },
+    );
+
+    expect(mocks.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tags: [
+          { name: 'app', value: 'ds-survey-bridge' },
+          { name: 'delivery_job_id', value: deliveryJobId },
+        ],
+      }),
+      {
+        idempotencyKey: `private-feedback/${deliveryJobId}`,
+      },
+    );
+    expect(JSON.stringify(mocks.send.mock.calls[0]?.[0].tags)).not.toContain(
+      '+15555550123',
+    );
+  });
+
 });

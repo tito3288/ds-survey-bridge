@@ -15,6 +15,8 @@ const smsPayload: SurveySmsPayload = {
   customerPhone: '+15555550123',
   customerName: 'Fake Customer',
 };
+const smsJobId = '10000000-0000-4000-8000-000000000123';
+const emailJobId = '20000000-0000-4000-8000-000000000123';
 
 const emailPayload: PrivateFeedbackEmailPayload = {
   kind: 'private_feedback_email',
@@ -67,7 +69,7 @@ describe('delivery providers', () => {
     const dependencies = createDependencies();
     const providers = createDeliveryProviders(dependencies);
 
-    await expect(providers.send(smsPayload, 'job-sms')).resolves.toEqual({
+    await expect(providers.send(smsPayload, smsJobId)).resolves.toEqual({
       outcome: 'sent',
       providerMessageId: 'SM_fake',
     });
@@ -75,6 +77,7 @@ describe('delivery providers', () => {
       to: '+15555550123',
       customerName: 'Fake Customer',
       surveyToken: smsPayload.surveyToken,
+      deliveryJobId: smsJobId,
     });
   });
 
@@ -99,7 +102,7 @@ describe('delivery providers', () => {
     const dependencies = createDependencies();
     const providers = createDeliveryProviders(dependencies);
 
-    await expect(providers.send(emailPayload, 'job-email-123')).resolves.toEqual(
+    await expect(providers.send(emailPayload, emailJobId)).resolves.toEqual(
       {
         outcome: 'sent',
         providerMessageId: 'email_fake',
@@ -110,7 +113,10 @@ describe('delivery providers', () => {
         orderId: 'ORDER-FAKE-123',
         answers: emailPayload.answers,
       }),
-      { idempotencyKey: 'private-feedback/job-email-123' },
+      {
+        idempotencyKey: `private-feedback/${emailJobId}`,
+        deliveryJobId: emailJobId,
+      },
     );
   });
 
@@ -155,12 +161,18 @@ describe('delivery providers', () => {
     expect(sendEmail).toHaveBeenNthCalledWith(
       1,
       expect.any(Object),
-      { idempotencyKey: 'private-feedback/stable-job-id' },
+      {
+        idempotencyKey: 'private-feedback/stable-job-id',
+        deliveryJobId: 'stable-job-id',
+      },
     );
     expect(sendEmail).toHaveBeenNthCalledWith(
       2,
       expect.any(Object),
-      { idempotencyKey: 'private-feedback/stable-job-id' },
+      {
+        idempotencyKey: 'private-feedback/stable-job-id',
+        deliveryJobId: 'stable-job-id',
+      },
     );
     expect(JSON.stringify(first)).not.toContain('customer data');
   });

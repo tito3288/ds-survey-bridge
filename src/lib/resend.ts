@@ -7,6 +7,7 @@ import {
   type QuestionnaireAnswers,
   type SurveyScore,
 } from '@/lib/questionnaire';
+import { RESEND_APP_TAG_VALUE } from '@/lib/resend-webhook';
 import type { Json } from '@/types/database';
 
 let resendClient: Resend | undefined;
@@ -78,7 +79,11 @@ export async function sendPrivateFeedbackEmail(
     customerPhone?: string;
     services?: Json | null;
   },
-  options?: { idempotencyKey?: string; signal?: AbortSignal },
+  options?: {
+    idempotencyKey?: string;
+    signal?: AbortSignal;
+    deliveryJobId?: string;
+  },
 ) {
   const {
     orderId,
@@ -105,6 +110,14 @@ export async function sendPrivateFeedbackEmail(
     from: 'Drive & Shine <onboarding@resend.dev>',
     to: getSupportEmails(),
     subject: `Private oil change survey feedback - Order ${orderId}`,
+    ...(options?.deliveryJobId
+      ? {
+          tags: [
+            { name: 'app', value: RESEND_APP_TAG_VALUE },
+            { name: 'delivery_job_id', value: options.deliveryJobId },
+          ],
+        }
+      : {}),
     text: [
       `A customer completed the private oil change questionnaire.`,
       ``,
