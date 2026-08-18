@@ -18,28 +18,43 @@ import type { Json } from '@/types/database';
 
 function createDependencies(): NormalizedOrderDependencies {
   return {
-    async lookupSurvey(orderId) {
+    async createSurvey(survey) {
       const supabase = getSupabaseAdmin();
       const { data, error } = await supabase
         .from('surveys')
-        .select('id')
-        .eq('order_id', orderId)
+        .upsert(
+          {
+            order_id: survey.orderId,
+            location_id: survey.locationId,
+            customer_phone: survey.customerPhone,
+            customer_name: survey.customerName,
+            // request.json() guarantees these provider values are JSON-compatible.
+            services: survey.services as Json,
+          },
+          { onConflict: 'order_id', ignoreDuplicates: true },
+        )
+        .select('survey_token')
         .maybeSingle();
 
-      return { exists: !!data, error };
-    },
-    async insertSurvey(survey) {
-      const supabase = getSupabaseAdmin();
-      const { error } = await supabase.from('surveys').insert({
-        order_id: survey.orderId,
-        location_id: survey.locationId,
-        customer_phone: survey.customerPhone,
-        customer_name: survey.customerName,
-        // request.json() guarantees these provider values are JSON-compatible.
-        services: survey.services as Json,
-      });
+      if (error) {
+        return { created: false, error };
+      }
 
-      return { error };
+      // ON CONFLICT DO NOTHING returns no representation for the losing
+      // concurrent request, which is how the caller distinguishes a duplicate.
+      if (!data) {
+        return { created: false, error: null };
+      }
+
+      const surveyToken = data.survey_token;
+      if (typeof surveyToken !== 'string' || surveyToken.length === 0) {
+        return {
+          created: false,
+          error: new Error('Survey creation did not return a survey token'),
+        };
+      }
+
+      return { created: true, surveyToken, error: null };
     },
     sendSurveySms: sendSurveySMS,
     async markSurveySent(orderId, sentAt) {

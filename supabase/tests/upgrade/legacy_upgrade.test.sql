@@ -4,12 +4,12 @@ create schema if not exists extensions;
 create extension if not exists pgtap with schema extensions;
 set local search_path = public, extensions;
 
-select plan(6);
+select plan(7);
 
 select is(
   (select count(*) from public.surveys where order_id = 'FAKE-PRE-002-ORDER'),
   1::bigint,
-  'the survey row created under migration 001 survives migration 002'
+  'the survey row created under migration 001 survives later migrations'
 );
 
 select is(
@@ -59,6 +59,15 @@ select is(
   ),
   null::smallint,
   'a pre-versioned row remains explicitly identifiable as legacy'
+);
+
+select ok(
+  (
+    select survey_token is not null
+    from public.surveys
+    where order_id = 'FAKE-PRE-002-ORDER'
+  ),
+  'a pre-versioned row receives a private survey token without changing its answers'
 );
 
 select * from finish();

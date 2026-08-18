@@ -11,14 +11,14 @@ import {
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import SurveyPage from '@/app/survey/[orderId]/page';
+import SurveyPage from '@/app/survey/[surveyToken]/page';
 import {
   MAX_COMMENT_LENGTH,
   QUESTIONNAIRE_ITEMS,
   type QuestionnaireAnswers,
 } from '@/lib/questionnaire';
 
-const ORDER_ID = 'fake-order-123';
+const SURVEY_TOKEN = '11111111-1111-4111-8111-111111111111';
 
 function apiResponse(
   body: unknown,
@@ -43,7 +43,7 @@ async function openQuestionnaire() {
   const fetchMock = vi.mocked(fetch);
   fetchMock.mockResolvedValueOnce(apiResponse({ next: 'questionnaire' }));
 
-  render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+  render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
   await user.click(screen.getByRole('button', { name: 'Rate 3 stars' }));
   await user.click(screen.getByRole('button', { name: 'Submit' }));
 
@@ -72,12 +72,23 @@ async function answerEveryQuestion(
 }
 
 describe('survey customer flow', () => {
-  it('preserves the initial star screen and posts the compatible rating payload', async () => {
+  it('shows an unavailable page for a legacy raw order link without calling the API', () => {
+    render(<SurveyPage params={{ surveyToken: 'fake-order-123' }} />);
+
+    expect(
+      screen.getByRole('heading', {
+        name: 'This survey link is unavailable',
+      }),
+    ).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('preserves the initial star screen and posts the token rating payload', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(apiResponse({ next: 'questionnaire' }));
 
-    render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+    render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
 
     expect(
       screen.getByRole('heading', { name: 'How was your oil change?' }),
@@ -100,7 +111,7 @@ describe('survey customer flow', () => {
       expect.objectContaining({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId: ORDER_ID, rating: 3 }),
+        body: JSON.stringify({ surveyToken: SURVEY_TOKEN, rating: 3 }),
         signal: expect.any(AbortSignal),
       }),
     );
@@ -112,12 +123,14 @@ describe('survey customer flow', () => {
     let clickedHref: string | undefined;
     let clickedTarget: string | undefined;
     let clickedRel: string | undefined;
+    let clickedReferrerPolicy: string | undefined;
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
       this: HTMLAnchorElement,
     ) {
       clickedHref = this.href;
       clickedTarget = this.target;
       clickedRel = this.rel;
+      clickedReferrerPolicy = this.referrerPolicy;
     });
     fetchMock.mockResolvedValueOnce(
       apiResponse({
@@ -126,7 +139,7 @@ describe('survey customer flow', () => {
       }),
     );
 
-    render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+    render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
     await user.click(screen.getByRole('button', { name: 'Rate 5 stars' }));
     await user.click(screen.getByRole('button', { name: 'Submit' }));
 
@@ -149,6 +162,7 @@ describe('survey customer flow', () => {
     );
     expect(fallback).toHaveAttribute('target', '_self');
     expect(fallback).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(fallback).toHaveAttribute('referrerpolicy', 'no-referrer');
 
     // Navigation happens as soon as the handoff renders; no countdown or
     // timer advancement is needed.
@@ -156,6 +170,7 @@ describe('survey customer flow', () => {
     expect(clickedHref).toBe('https://example.com/fake-review-location');
     expect(clickedTarget).toBe('_self');
     expect(clickedRel).toBe('noopener noreferrer');
+    expect(clickedReferrerPolicy).toBe('no-referrer');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -172,7 +187,7 @@ describe('survey customer flow', () => {
       .mockImplementation(() => undefined);
     fetchMock.mockResolvedValueOnce(apiResponse({ next: 'google', url }));
 
-    render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+    render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
     await user.click(screen.getByRole('button', { name: 'Rate 5 stars' }));
     await user.click(screen.getByRole('button', { name: 'Submit' }));
 
@@ -197,7 +212,7 @@ describe('survey customer flow', () => {
       apiResponse({ next: 'complete' }),
     );
 
-    render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+    render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
     await user.click(screen.getByRole('button', { name: 'Rate 4 stars' }));
     await user.click(screen.getByRole('button', { name: 'Submit' }));
 
@@ -220,7 +235,7 @@ describe('survey customer flow', () => {
       apiResponse({ error: 'Unknown order' }, false, 404),
     );
 
-    render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+    render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
     await user.click(screen.getByRole('button', { name: 'Rate 2 stars' }));
     await user.click(screen.getByRole('button', { name: 'Submit' }));
 
@@ -246,7 +261,7 @@ describe('survey customer flow', () => {
         apiResponse({ error: 'Internal details must stay hidden' }, false, status),
       );
 
-      render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+      render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
       const rating = screen.getByRole('button', { name: 'Rate 2 stars' });
       const submitButton = screen.getByRole('button', { name: 'Submit' });
       const form = submitButton.closest('form');
@@ -281,7 +296,7 @@ describe('survey customer flow', () => {
         }),
     );
 
-    render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+    render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
     const rating = screen.getByRole('button', { name: 'Rate 4 stars' });
     await user.click(rating);
     const submitButton = screen.getByRole('button', { name: 'Submit' });
@@ -376,7 +391,7 @@ describe('survey customer flow', () => {
     ).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(postedBody(1)).toEqual({
-      orderId: ORDER_ID,
+      surveyToken: SURVEY_TOKEN,
       answers: scores,
       comment: 'More frequent progress updates',
     });
@@ -413,7 +428,10 @@ describe('survey customer flow', () => {
       name: 'Thank you for helping us improve.',
     });
 
-    expect(postedBody(1)).toEqual({ orderId: ORDER_ID, answers: scores });
+    expect(postedBody(1)).toEqual({
+      surveyToken: SURVEY_TOKEN,
+      answers: scores,
+    });
   });
 
   it('preserves every answer and the comment after an error so submission can be retried', async () => {
@@ -503,7 +521,7 @@ describe('survey customer flow', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(postedBody(1)).toEqual({
-      orderId: ORDER_ID,
+      surveyToken: SURVEY_TOKEN,
       answers: scores,
       comment: 'Please preserve this concurrency feedback',
     });
@@ -555,7 +573,7 @@ describe('survey customer flow', () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(apiResponse({ ok: true }));
 
-    render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+    render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
     const rating = screen.getByRole('button', { name: 'Rate 2 stars' });
     await user.click(rating);
     await user.click(screen.getByRole('button', { name: 'Submit' }));
@@ -577,7 +595,7 @@ describe('survey customer flow', () => {
       },
     } as unknown as Response);
 
-    render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+    render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
     const rating = screen.getByRole('button', { name: 'Rate 1 star' });
     await user.click(rating);
     await user.click(screen.getByRole('button', { name: 'Submit' }));
@@ -611,7 +629,7 @@ describe('survey customer flow', () => {
           }),
       );
 
-      render(<SurveyPage params={{ orderId: ORDER_ID }} />);
+      render(<SurveyPage params={{ surveyToken: SURVEY_TOKEN }} />);
       const rating = screen.getByRole('button', { name: 'Rate 3 stars' });
       fireEvent.click(rating);
       const submitButton = screen.getByRole('button', { name: 'Submit' });
@@ -645,7 +663,7 @@ describe('survey customer flow', () => {
 
   it('shows the existing invalid-link message without contacting the API', () => {
     const fetchMock = vi.mocked(fetch);
-    render(<SurveyPage params={{ orderId: '' }} />);
+    render(<SurveyPage params={{ surveyToken: '' }} />);
 
     expect(
       screen.getByRole('heading', { name: 'Invalid survey link' }),

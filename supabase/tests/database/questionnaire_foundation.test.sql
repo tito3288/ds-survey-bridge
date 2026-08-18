@@ -4,7 +4,7 @@ create schema if not exists extensions;
 create extension if not exists pgtap with schema extensions;
 set local search_path = public, extensions;
 
-select plan(33);
+select plan(41);
 
 select has_column('public', 'surveys', 'wait_time_score', 'wait-time score column exists');
 select has_column('public', 'surveys', 'service_speed_score', 'service-speed score column exists');
@@ -18,12 +18,63 @@ select has_column(
 select has_column('public', 'surveys', 'value_score', 'value score column exists');
 select has_column('public', 'surveys', 'team_friendliness_score', 'team-friendliness score column exists');
 select has_column('public', 'surveys', 'survey_flow_version', 'survey flow version column exists');
+select has_column('public', 'surveys', 'survey_token', 'private survey token column exists');
 select has_column('public', 'surveys', 'questionnaire_version', 'questionnaire version column exists');
 select has_column(
   'public',
   'surveys',
   'questionnaire_submitted_at',
   'questionnaire completion-time column exists'
+);
+
+select is(
+  (
+    select format_type(attribute.atttypid, attribute.atttypmod)
+    from pg_catalog.pg_attribute as attribute
+    where attribute.attrelid = 'public.surveys'::regclass
+      and attribute.attname = 'survey_token'
+      and not attribute.attisdropped
+  ),
+  'uuid',
+  'private survey tokens use the UUID database type'
+);
+
+select is(
+  (
+    select attribute.attnotnull
+    from pg_catalog.pg_attribute as attribute
+    where attribute.attrelid = 'public.surveys'::regclass
+      and attribute.attname = 'survey_token'
+      and not attribute.attisdropped
+  ),
+  true,
+  'private survey tokens cannot be null'
+);
+
+select ok(
+  (
+    select pg_get_expr(default_value.adbin, default_value.adrelid)
+      like '%gen_random_uuid()%'
+    from pg_catalog.pg_attrdef as default_value
+    join pg_catalog.pg_attribute as attribute
+      on attribute.attrelid = default_value.adrelid
+      and attribute.attnum = default_value.adnum
+    where default_value.adrelid = 'public.surveys'::regclass
+      and attribute.attname = 'survey_token'
+  ),
+  'private survey tokens have a database-generated UUID default'
+);
+
+select is(
+  (
+    select count(*)::integer
+    from pg_catalog.pg_constraint
+    where conrelid = 'public.surveys'::regclass
+      and conname = 'surveys_survey_token_key'
+      and contype = 'u'
+  ),
+  1,
+  'private survey tokens have a unique constraint'
 );
 
 select lives_ok(
@@ -66,8 +117,42 @@ select is(
     from public.surveys
     where order_id = 'PGTAP-LEGACY-ORDER'
   ),
-  1::smallint,
-  'rows inserted after migration 002 receive flow version 1'
+  2::smallint,
+  'rows inserted after migration 003 receive flow version 2'
+);
+
+select lives_ok(
+  $sql$
+    insert into public.surveys (order_id, location_id)
+    values
+      ('PGTAP-TOKEN-ORDER-A', 'FAKE-LOC-001'),
+      ('PGTAP-TOKEN-ORDER-B', 'FAKE-LOC-001')
+  $sql$,
+  'new surveys receive tokens without application-supplied values'
+);
+
+select is(
+  (
+    select count(distinct survey_token)
+    from public.surveys
+    where order_id in ('PGTAP-TOKEN-ORDER-A', 'PGTAP-TOKEN-ORDER-B')
+  ),
+  2::bigint,
+  'database-generated survey tokens are unique per row'
+);
+
+select throws_like(
+  $sql$
+    insert into public.surveys (order_id, location_id, survey_token)
+    select
+      'PGTAP-DUPLICATE-TOKEN-ORDER',
+      'FAKE-LOC-001',
+      survey_token
+    from public.surveys
+    where order_id = 'PGTAP-TOKEN-ORDER-A'
+  $sql$,
+  '%surveys_survey_token_key%',
+  'duplicate private survey tokens are rejected'
 );
 
 select lives_ok(

@@ -9,6 +9,7 @@ import {
   type QuestionnaireKey,
   type SurveyScore,
 } from '@/lib/questionnaire';
+import { isSurveyToken } from '@/lib/survey-token';
 
 type Stage =
   | 'rating'
@@ -30,12 +31,12 @@ class SubmissionError extends Error {
 }
 
 type RatingPayload = {
-  orderId: string;
+  surveyToken: string;
   rating: SurveyScore;
 };
 
 type QuestionnairePayload = {
-  orderId: string;
+  surveyToken: string;
   answers: QuestionnaireAnswers;
   comment?: string;
 };
@@ -61,7 +62,7 @@ const TIMEOUT_ERROR_MESSAGE =
   'This is taking longer than expected. Please try again.';
 
 type SurveyPageProps = {
-  params: { orderId: string };
+  params: { surveyToken: string };
 };
 
 function isSubmitResponse(value: unknown): value is SubmitResponse {
@@ -91,15 +92,19 @@ function navigateToReview(url: string) {
   link.href = url;
   link.target = '_self';
   link.rel = 'noopener noreferrer';
+  link.referrerPolicy = 'no-referrer';
   link.click();
 }
 
 export default function SurveyPage({ params }: SurveyPageProps) {
-  const orderId = params.orderId;
+  const surveyToken = params.surveyToken;
+  const validSurveyToken = isSurveyToken(surveyToken);
 
   const [rating, setRating] = useState<SurveyScore | null>(null);
   const [hover, setHover] = useState<SurveyScore | null>(null);
-  const [stage, setStage] = useState<Stage>('rating');
+  const [stage, setStage] = useState<Stage>(
+    validSurveyToken ? 'rating' : 'unavailable',
+  );
   const [answers, setAnswers] = useState<Partial<QuestionnaireAnswers>>({});
   const [comment, setComment] = useState('');
   const [googleReviewUrl, setGoogleReviewUrl] = useState<string | null>(null);
@@ -129,7 +134,7 @@ export default function SurveyPage({ params }: SurveyPageProps) {
     }
   }, [googleReviewUrl, stage]);
 
-  if (!orderId) {
+  if (!surveyToken) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-white px-4 py-12">
         <div className="w-full max-w-md rounded-2xl border border-gray-100 bg-white p-8 text-center shadow-sm">
@@ -241,7 +246,7 @@ export default function SurveyPage({ params }: SurveyPageProps) {
     if (rating === null || submissionInFlight.current) return;
 
     try {
-      const response = await submit({ orderId, rating });
+      const response = await submit({ surveyToken, rating });
       handleNextStep(response, 'rating');
     } catch (submissionError) {
       handleSubmissionError(submissionError);
@@ -268,7 +273,7 @@ export default function SurveyPage({ params }: SurveyPageProps) {
 
     try {
       const response = await submit({
-        orderId,
+        surveyToken,
         answers: completeAnswers,
         ...(trimmedComment ? { comment: trimmedComment } : {}),
       });
@@ -537,6 +542,7 @@ export default function SurveyPage({ params }: SurveyPageProps) {
               href={googleReviewUrl}
               target="_self"
               rel="noopener noreferrer"
+              referrerPolicy="no-referrer"
               className="mt-6 inline-flex min-h-12 items-center justify-center rounded-xl px-6 py-3 text-base font-semibold text-white shadow-sm focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
               style={{ backgroundColor: BRAND_RED, outlineColor: BRAND_BLUE }}
             >

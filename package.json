@@ -18,7 +18,9 @@
     "db:stop": "supabase stop",
     "db:reset": "supabase db reset --local",
     "test:db:schema": "supabase db reset --local && supabase test db --local supabase/tests/database/questionnaire_foundation.test.sql",
-    "test:db:upgrade": "supabase db reset --local --version 001 --sql-paths tests/fixtures/legacy_before_002.sql && supabase migration up --local && supabase test db --local supabase/tests/upgrade/legacy_upgrade.test.sql",
+    "test:db:upgrade:legacy": "supabase db reset --local --version 001 --sql-paths tests/fixtures/legacy_before_002.sql && supabase migration up --local && supabase test db --local supabase/tests/upgrade/legacy_upgrade.test.sql",
+    "test:db:upgrade:tokens": "supabase db reset --local --version 002 --sql-paths tests/fixtures/legacy_before_003.sql && supabase migration up --local && supabase test db --local supabase/tests/upgrade/private_tokens_upgrade.test.sql",
+    "test:db:upgrade": "npm run test:db:upgrade:legacy && npm run test:db:upgrade:tokens",
     "test:db": "npm run test:db:schema && npm run test:db:upgrade",
     "db:types": "node scripts/database-types.mjs",
     "db:types:check": "node scripts/database-types.mjs --check"

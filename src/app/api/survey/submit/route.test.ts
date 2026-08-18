@@ -68,8 +68,13 @@ const completeAnswers = {
   teamFriendliness: 5,
 };
 
+const SURVEY_TOKEN = '11111111-1111-4111-8111-111111111111';
+const UNKNOWN_SURVEY_TOKEN = '22222222-2222-4222-8222-222222222222';
+const INTERNAL_ORDER_ID = 'FAKE-INTERNAL-ORDER-001';
+
 const surveyRecord = {
   id: 'survey-test-id',
+  order_id: INTERNAL_ORDER_ID,
   location_id: 'FAKE-LOC-001',
   customer_name: 'Fictional Customer',
   customer_phone: '+15555550123',
@@ -81,6 +86,7 @@ const surveyRecord = {
 function completedSurveyRecord(rating: number) {
   return {
     id: surveyRecord.id,
+    order_id: surveyRecord.order_id,
     rating,
     location_id: surveyRecord.location_id,
     customer_name: surveyRecord.customer_name,
@@ -96,7 +102,7 @@ const locationRecord = {
 
 function questionnaireBody(comment?: string) {
   return {
-    orderId: 'fake-order',
+    surveyToken: SURVEY_TOKEN,
     answers: completeAnswers,
     ...(comment === undefined ? {} : { comment }),
   };
@@ -130,20 +136,40 @@ describe('POST /api/survey/submit validation', () => {
 
   it.each([
     [
-      { orderId: '', rating: 4 },
-      'orderId must be a non-empty string',
+      { orderId: 'raw-order-id', rating: 4 },
+      'Unexpected fields in rating submission',
     ],
     [
-      { orderId: 'fake-order', rating: 2, answers: completeAnswers },
+      { surveyToken: SURVEY_TOKEN, rating: 2, answers: completeAnswers },
       'Submit either an overall rating or questionnaire answers',
     ],
     [
-      { orderId: 'fake-order', rating: 2, comment: 'old mixed shape' },
+      {
+        surveyToken: SURVEY_TOKEN,
+        orderId: 'raw-order-id',
+        rating: 2,
+      },
       'Unexpected fields in rating submission',
     ],
     [
-      { orderId: 'fake-order', rating: 2, extra: true },
+      { surveyToken: SURVEY_TOKEN, rating: 2, comment: 'old mixed shape' },
       'Unexpected fields in rating submission',
+    ],
+    [
+      { surveyToken: SURVEY_TOKEN, rating: 2, extra: true },
+      'Unexpected fields in rating submission',
+    ],
+    [
+      { orderId: 'raw-order-id', answers: completeAnswers },
+      'Unexpected fields in questionnaire submission',
+    ],
+    [
+      {
+        surveyToken: SURVEY_TOKEN,
+        orderId: 'raw-order-id',
+        answers: completeAnswers,
+      },
+      'Unexpected fields in questionnaire submission',
     ],
     [
       {
@@ -164,6 +190,23 @@ describe('POST /api/survey/submit validation', () => {
     expect(mocks.getSupabaseAdmin).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { surveyToken: 'raw-order-id', rating: 4 },
+    { surveyToken: '', rating: 4 },
+    { surveyToken: '11111111-1111-1111-8111-111111111111', rating: 4 },
+    { surveyToken: 'raw-order-id', answers: completeAnswers },
+  ])(
+    'returns the generic 404 for a malformed token before initializing Supabase: %s',
+    async (body) => {
+      const response = await POST(createRequest(body));
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'Survey not found' });
+      expect(mocks.getSupabaseAdmin).not.toHaveBeenCalled();
+      expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects comments beyond 2,000 characters before database access', async () => {
     const response = await POST(
       createRequest(questionnaireBody('x'.repeat(MAX_COMMENT_LENGTH + 1))),
@@ -180,7 +223,7 @@ describe('POST /api/survey/submit validation', () => {
     vi.stubEnv('GOOGLE_REVIEW_MIN_RATING', '3.5');
 
     const response = await POST(
-      createRequest({ orderId: 'fake-order', rating: 4 }),
+      createRequest({ surveyToken: SURVEY_TOKEN, rating: 4 }),
     );
 
     expect(response.status).toBe(500);
@@ -190,16 +233,25 @@ describe('POST /api/survey/submit validation', () => {
 });
 
 describe('POST /api/survey/submit initial rating', () => {
-  it('returns 404 for an unknown survey link', async () => {
+  it.each([
+    { surveyToken: UNKNOWN_SURVEY_TOKEN, rating: 4 },
+    {
+      surveyToken: UNKNOWN_SURVEY_TOKEN,
+      answers: completeAnswers,
+    },
+  ])('returns the generic 404 for an unknown survey link: %s', async (body) => {
     const surveyLookup = createLookup({ data: null, error: null });
     installSupabaseQueries(surveyLookup.query);
 
-    const response = await POST(
-      createRequest({ orderId: 'missing-order', rating: 4 }),
-    );
+    const response = await POST(createRequest(body));
 
     expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: 'Order not found' });
+    expect(await response.json()).toEqual({ error: 'Survey not found' });
+    expect(surveyLookup.eq).toHaveBeenCalledWith(
+      'survey_token',
+      UNKNOWN_SURVEY_TOKEN,
+    );
+    expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 
   it('returns 500 when the survey lookup fails', async () => {
@@ -210,7 +262,7 @@ describe('POST /api/survey/submit initial rating', () => {
     installSupabaseQueries(surveyLookup.query);
 
     const response = await POST(
-      createRequest({ orderId: 'fake-order', rating: 4 }),
+      createRequest({ surveyToken: SURVEY_TOKEN, rating: 4 }),
     );
 
     expect(response.status).toBe(500);
@@ -228,7 +280,7 @@ describe('POST /api/survey/submit initial rating', () => {
     installSupabaseQueries(surveyLookup.query, update.query);
 
     const response = await POST(
-      createRequest({ orderId: 'fake-order', rating }),
+      createRequest({ surveyToken: SURVEY_TOKEN, rating }),
     );
 
     expect(response.status).toBe(200);
@@ -239,6 +291,7 @@ describe('POST /api/survey/submit initial rating', () => {
     });
     expect(update.eq).toHaveBeenCalledWith('id', 'survey-test-id');
     expect(update.is).toHaveBeenCalledWith('questionnaire_submitted_at', null);
+    expect(surveyLookup.eq).toHaveBeenCalledWith('survey_token', SURVEY_TOKEN);
     expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
     },
   );
@@ -262,7 +315,7 @@ describe('POST /api/survey/submit initial rating', () => {
     );
 
     const response = await POST(
-      createRequest({ orderId: 'fake-order', rating }),
+      createRequest({ surveyToken: SURVEY_TOKEN, rating }),
     );
 
     expect(response.status).toBe(200);
@@ -283,7 +336,7 @@ describe('POST /api/survey/submit initial rating', () => {
     installSupabaseQueries(surveyLookup.query, update.query);
 
     const response = await POST(
-      createRequest({ orderId: 'fake-order', rating: 4 }),
+      createRequest({ surveyToken: SURVEY_TOKEN, rating: 4 }),
     );
 
     expect(response.status).toBe(200);
@@ -320,7 +373,7 @@ describe('POST /api/survey/submit initial rating', () => {
     );
 
     const response = await POST(
-      createRequest({ orderId: 'fake-order', rating: 5 }),
+      createRequest({ surveyToken: SURVEY_TOKEN, rating: 5 }),
     );
 
     expect(response.status).toBe(200);
@@ -336,7 +389,7 @@ describe('POST /api/survey/submit initial rating', () => {
     installSupabaseQueries(surveyLookup.query, update.query);
 
     const response = await POST(
-      createRequest({ orderId: 'fake-order', rating: 2 }),
+      createRequest({ surveyToken: SURVEY_TOKEN, rating: 2 }),
     );
 
     expect(response.status).toBe(500);
@@ -355,7 +408,7 @@ describe('POST /api/survey/submit initial rating', () => {
     installSupabaseQueries(surveyLookup.query);
 
     const response = await POST(
-      createRequest({ orderId: 'fake-order', rating: 5 }),
+      createRequest({ surveyToken: SURVEY_TOKEN, rating: 5 }),
     );
 
     expect(response.status).toBe(200);
@@ -369,7 +422,7 @@ describe('POST /api/survey/submit initial rating', () => {
     installSupabaseQueries(surveyLookup.query, update.query);
 
     const response = await POST(
-      createRequest({ orderId: 'fake-order', rating: 5 }),
+      createRequest({ surveyToken: SURVEY_TOKEN, rating: 5 }),
     );
 
     expect(response.status).toBe(200);
@@ -395,7 +448,7 @@ describe('POST /api/survey/submit initial rating', () => {
     );
 
     const response = await POST(
-      createRequest({ orderId: 'fake-order', rating: 5 }),
+      createRequest({ surveyToken: SURVEY_TOKEN, rating: 5 }),
     );
 
     expect(response.status).toBe(500);
@@ -444,8 +497,11 @@ describe('POST /api/survey/submit questionnaire', () => {
     expect(update.eq).toHaveBeenCalledWith('id', 'survey-test-id');
     expect(update.is).toHaveBeenCalledWith('questionnaire_submitted_at', null);
     expect(update.lt).toHaveBeenCalledWith('rating', 4);
+    expect(update.select).toHaveBeenCalledWith(
+      'id, order_id, rating, location_id, customer_phone, customer_name, services',
+    );
     expect(mocks.sendPrivateFeedbackEmail).toHaveBeenCalledWith({
-      orderId: 'fake-order',
+      orderId: INTERNAL_ORDER_ID,
       rating: 2,
       answers: completeAnswers,
       comment: 'Fictional private feedback',
@@ -659,6 +715,26 @@ describe('POST /api/survey/submit questionnaire', () => {
     expect(await response.json()).toEqual({
       error: 'Survey response changed; please try again',
     });
+    expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
+  });
+
+  it('returns the generic 404 when a survey disappears during a questionnaire update', async () => {
+    const surveyLookup = createLookup({
+      data: { ...surveyRecord, rating: 2 },
+      error: null,
+    });
+    const update = createFilteredUpdate({ data: null, error: null });
+    const currentSurveyLookup = createLookup({ data: null, error: null });
+    installSupabaseQueries(
+      surveyLookup.query,
+      update.query,
+      currentSurveyLookup.query,
+    );
+
+    const response = await POST(createRequest(questionnaireBody()));
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'Survey not found' });
     expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 

@@ -3,6 +3,7 @@ import {
   processNormalizedOrder,
   type NormalizedOrder,
   type NormalizedOrderDependencies,
+  type SurveyCreationResult,
 } from './process-normalized-order';
 
 const oilChangeOrder: NormalizedOrder = {
@@ -14,22 +15,20 @@ const oilChangeOrder: NormalizedOrder = {
 };
 
 type HarnessOptions = {
-  lookupResult?: { exists: boolean; error: unknown | null };
-  insertResult?: { error: unknown | null };
+  creationResult?: SurveyCreationResult;
   smsError?: Error;
   sentAtResult?: { error: unknown | null };
 };
 
 function createHarness(options: HarnessOptions = {}) {
-  const lookupResult = options.lookupResult ?? {
-    exists: false,
+  const creationResult = options.creationResult ?? {
+    created: true,
+    surveyToken: '00000000-0000-4000-8000-000000000123',
     error: null,
   };
-  const insertResult = options.insertResult ?? { error: null };
   const sentAtResult = options.sentAtResult ?? { error: null };
 
-  const lookupSurvey = vi.fn(async () => lookupResult);
-  const insertSurvey = vi.fn(async () => insertResult);
+  const createSurvey = vi.fn(async () => creationResult);
   const sendSurveySms = vi.fn(async () => {
     if (options.smsError) throw options.smsError;
     return 'SM_test_123';
@@ -42,8 +41,7 @@ function createHarness(options: HarnessOptions = {}) {
   };
 
   const dependencies: NormalizedOrderDependencies = {
-    lookupSurvey,
-    insertSurvey,
+    createSurvey,
     sendSurveySms,
     markSurveySent,
     now: () => new Date('2026-08-18T12:34:56.000Z'),
@@ -52,8 +50,7 @@ function createHarness(options: HarnessOptions = {}) {
 
   return {
     dependencies,
-    lookupSurvey,
-    insertSurvey,
+    createSurvey,
     sendSurveySms,
     markSurveySent,
     logger,
@@ -73,8 +70,7 @@ describe('processNormalizedOrder', () => {
       status: 200,
       body: { ok: true, skipped: 'missing_fields' },
     });
-    expect(harness.lookupSurvey).not.toHaveBeenCalled();
-    expect(harness.insertSurvey).not.toHaveBeenCalled();
+    expect(harness.createSurvey).not.toHaveBeenCalled();
     expect(harness.sendSurveySms).not.toHaveBeenCalled();
   });
 
@@ -90,13 +86,12 @@ describe('processNormalizedOrder', () => {
       status: 200,
       body: { ok: true, skipped: 'not_oil_change' },
     });
-    expect(harness.lookupSurvey).not.toHaveBeenCalled();
-    expect(harness.insertSurvey).not.toHaveBeenCalled();
+    expect(harness.createSurvey).not.toHaveBeenCalled();
   });
 
-  it('acknowledges and skips an existing order', async () => {
+  it('acknowledges and skips a duplicate without sending another SMS', async () => {
     const harness = createHarness({
-      lookupResult: { exists: true, error: null },
+      creationResult: { created: false, error: null },
     });
 
     const result = await processNormalizedOrder(
@@ -108,15 +103,63 @@ describe('processNormalizedOrder', () => {
       status: 200,
       body: { ok: true, skipped: 'duplicate' },
     });
-    expect(harness.lookupSurvey).toHaveBeenCalledWith('order-test-123');
-    expect(harness.insertSurvey).not.toHaveBeenCalled();
+    expect(harness.createSurvey).toHaveBeenCalledOnce();
     expect(harness.sendSurveySms).not.toHaveBeenCalled();
   });
 
-  it('returns an internal error when duplicate lookup fails', async () => {
-    const lookupError = new Error('lookup failed');
+  it('sends exactly one SMS when duplicate orders are processed concurrently', async () => {
+    let claimed = false;
+    const createSurvey = vi.fn(
+      async (): Promise<SurveyCreationResult> => {
+        // Let both requests reach the atomic persistence boundary before one
+        // becomes the winner and the other observes the conflict.
+        await Promise.resolve();
+        if (claimed) {
+          return { created: false, error: null };
+        }
+
+        claimed = true;
+        return {
+          created: true,
+          surveyToken: '00000000-0000-4000-8000-000000000123',
+          error: null,
+        };
+      },
+    );
+    const sendSurveySms = vi.fn(async () => 'SM_test_concurrent');
+    const markSurveySent = vi.fn(async () => ({ error: null }));
+    const dependencies: NormalizedOrderDependencies = {
+      createSurvey,
+      sendSurveySms,
+      markSurveySent,
+      now: () => new Date('2026-08-18T12:34:56.000Z'),
+      logger: {
+        log: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+    };
+
+    const results = await Promise.all([
+      processNormalizedOrder(oilChangeOrder, dependencies),
+      processNormalizedOrder(oilChangeOrder, dependencies),
+    ]);
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        { status: 200, body: { ok: true, orderId: 'order-test-123' } },
+        { status: 200, body: { ok: true, skipped: 'duplicate' } },
+      ]),
+    );
+    expect(createSurvey).toHaveBeenCalledTimes(2);
+    expect(sendSurveySms).toHaveBeenCalledOnce();
+    expect(markSurveySent).toHaveBeenCalledOnce();
+  });
+
+  it('returns an internal error when atomic survey creation fails', async () => {
+    const creationError = new Error('creation failed');
     const harness = createHarness({
-      lookupResult: { exists: false, error: lookupError },
+      creationResult: { created: false, error: creationError },
     });
 
     const result = await processNormalizedOrder(
@@ -128,17 +171,18 @@ describe('processNormalizedOrder', () => {
       status: 500,
       body: { error: 'Internal server error' },
     });
-    expect(harness.insertSurvey).not.toHaveBeenCalled();
     expect(harness.sendSurveySms).not.toHaveBeenCalled();
     expect(harness.logger.error).toHaveBeenCalledWith(
-      '[droptop webhook] survey lookup failed',
-      lookupError,
+      '[droptop webhook] survey insert failed',
+      creationError,
     );
   });
 
-  it('returns an internal error and does not send when insert fails', async () => {
-    const insertError = new Error('insert failed');
-    const harness = createHarness({ insertResult: { error: insertError } });
+  it('passes the complete survey record to atomic creation', async () => {
+    const creationError = new Error('insert failed');
+    const harness = createHarness({
+      creationResult: { created: false, error: creationError },
+    });
 
     const result = await processNormalizedOrder(
       oilChangeOrder,
@@ -149,7 +193,7 @@ describe('processNormalizedOrder', () => {
       status: 500,
       body: { error: 'Internal server error' },
     });
-    expect(harness.insertSurvey).toHaveBeenCalledWith({
+    expect(harness.createSurvey).toHaveBeenCalledWith({
       orderId: 'order-test-123',
       locationId: 'location-test-456',
       customerPhone: '+15555550123',
@@ -171,7 +215,7 @@ describe('processNormalizedOrder', () => {
       status: 200,
       body: { ok: true, orderId: 'order-test-123' },
     });
-    expect(harness.insertSurvey).toHaveBeenCalledWith({
+    expect(harness.createSurvey).toHaveBeenCalledWith({
       orderId: 'order-test-123',
       locationId: 'location-test-456',
       customerPhone: '+15555550123',
@@ -181,7 +225,7 @@ describe('processNormalizedOrder', () => {
     expect(harness.sendSurveySms).toHaveBeenCalledWith({
       to: '+15555550123',
       customerName: 'Test Customer',
-      orderId: 'order-test-123',
+      surveyToken: '00000000-0000-4000-8000-000000000123',
     });
     expect(harness.markSurveySent).toHaveBeenCalledWith(
       'order-test-123',
@@ -202,14 +246,14 @@ describe('processNormalizedOrder', () => {
       status: 200,
       body: { ok: true, orderId: 'order-test-123' },
     });
-    expect(harness.insertSurvey).toHaveBeenCalledOnce();
+    expect(harness.createSurvey).toHaveBeenCalledOnce();
     expect(harness.sendSurveySms).toHaveBeenCalledOnce();
     expect(harness.markSurveySent).not.toHaveBeenCalled();
     expect(harness.logger.error).toHaveBeenCalledWith(
       '[droptop webhook] SMS send failed',
       smsError,
     );
-    expect(harness.insertSurvey.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(harness.createSurvey.mock.invocationCallOrder[0]).toBeLessThan(
       harness.sendSurveySms.mock.invocationCallOrder[0],
     );
   });

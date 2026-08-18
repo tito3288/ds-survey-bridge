@@ -18,15 +18,27 @@ type OperationResult = {
   error: unknown | null;
 };
 
+export type SurveyCreationResult =
+  | {
+      created: true;
+      surveyToken: string;
+      error: null;
+    }
+  | {
+      created: false;
+      error: null;
+    }
+  | {
+      created: false;
+      error: unknown;
+    };
+
 export type NormalizedOrderDependencies = {
-  lookupSurvey: (
-    orderId: string,
-  ) => Promise<{ exists: boolean; error: unknown | null }>;
-  insertSurvey: (survey: PendingSurvey) => Promise<OperationResult>;
+  createSurvey: (survey: PendingSurvey) => Promise<SurveyCreationResult>;
   sendSurveySms: (message: {
     to: string;
     customerName?: string;
-    orderId: string;
+    surveyToken: string;
   }) => Promise<string>;
   markSurveySent: (
     orderId: string,
@@ -74,8 +86,7 @@ export async function processNormalizedOrder(
   dependencies: NormalizedOrderDependencies,
 ): Promise<NormalizedOrderResult> {
   const {
-    lookupSurvey,
-    insertSurvey,
+    createSurvey,
     sendSurveySms,
     markSurveySent,
     now,
@@ -98,24 +109,10 @@ export async function processNormalizedOrder(
     return { status: 200, body: { ok: true, skipped: 'not_oil_change' } };
   }
 
-  const lookup = await lookupSurvey(order.orderId);
-
-  if (lookup.error) {
-    logger.error('[droptop webhook] survey lookup failed', lookup.error);
-    return {
-      status: 500,
-      body: { error: 'Internal server error' },
-    };
-  }
-
-  if (lookup.exists) {
-    logger.log('[droptop webhook] duplicate order, skipping', {
-      orderId: order.orderId,
-    });
-    return { status: 200, body: { ok: true, skipped: 'duplicate' } };
-  }
-
-  const insert = await insertSurvey({
+  // A single insert protected by surveys.order_id's unique constraint makes
+  // duplicate detection race-safe. A separate lookup can allow two concurrent
+  // deliveries to both observe "missing" and both attempt to send.
+  const creation = await createSurvey({
     orderId: order.orderId,
     locationId: order.locationId,
     customerPhone: order.customerPhone,
@@ -123,12 +120,19 @@ export async function processNormalizedOrder(
     services: order.services ?? [],
   });
 
-  if (insert.error) {
-    logger.error('[droptop webhook] survey insert failed', insert.error);
+  if (creation.error) {
+    logger.error('[droptop webhook] survey insert failed', creation.error);
     return {
       status: 500,
       body: { error: 'Internal server error' },
     };
+  }
+
+  if (!creation.created) {
+    logger.log('[droptop webhook] duplicate order, skipping', {
+      orderId: order.orderId,
+    });
+    return { status: 200, body: { ok: true, skipped: 'duplicate' } };
   }
 
   // TODO: schedule SMS dispatch ~3 hours after finalization instead of sending immediately.
@@ -136,7 +140,7 @@ export async function processNormalizedOrder(
     const sid = await sendSurveySms({
       to: order.customerPhone,
       customerName: order.customerName,
-      orderId: order.orderId,
+      surveyToken: creation.surveyToken,
     });
     logger.log('[droptop webhook] SMS sent', {
       orderId: order.orderId,
@@ -150,8 +154,8 @@ export async function processNormalizedOrder(
     }
   } catch (smsError) {
     logger.error('[droptop webhook] SMS send failed', smsError);
-    // The survey row remains available for a later retry. A successful webhook
-    // response prevents DropTop from retrying the entire order.
+    // Keep the unsent survey record for Batch 5's durable delivery recovery.
+    // A successful webhook response prevents DropTop from replaying the order.
   }
 
   return { status: 200, body: { ok: true, orderId: order.orderId } };

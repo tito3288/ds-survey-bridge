@@ -51,6 +51,7 @@ export type Database = {
           service_speed_score: number | null
           services: Json | null
           survey_flow_version: number | null
+          survey_token: string
           team_friendliness_score: number | null
           value_score: number | null
           vehicle_cleanliness_score: number | null
@@ -73,6 +74,7 @@ export type Database = {
           service_speed_score?: number | null
           services?: Json | null
           survey_flow_version?: number | null
+          survey_token?: string
           team_friendliness_score?: number | null
           value_score?: number | null
           vehicle_cleanliness_score?: number | null
@@ -95,6 +97,7 @@ export type Database = {
           service_speed_score?: number | null
           services?: Json | null
           survey_flow_version?: number | null
+          survey_token?: string
           team_friendliness_score?: number | null
           value_score?: number | null
           vehicle_cleanliness_score?: number | null

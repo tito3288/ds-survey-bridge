@@ -8,6 +8,7 @@ show a brief handoff before automatically opening the location's mapped Google
 review page in the same tab. A visible link lets the customer continue manually
 if automatic navigation does not complete. If a review link is unavailable or
 unsafe, the service finishes safely without sending the customer to Google.
+Customer links use random survey tokens instead of exposing DropTop order IDs.
 
 ## Requirements
 
@@ -58,7 +59,7 @@ six scores is sent to the comma-separated addresses in `SUPPORT_EMAIL`.
 After private feedback is recorded, the customer sees a confirmation explaining
 that the team will use it to improve future visits. A missing or unsafe Google
 review link instead receives a neutral confirmation that the response was
-recorded. Survey links for unknown orders show a dedicated unavailable-link
+recorded. Unknown or malformed survey links show a dedicated unavailable-link
 page rather than encouraging repeated submissions. Retryable failures preserve
 the customer's selections so they can try again.
 
@@ -74,11 +75,31 @@ reversible rather than being embedded in the database.
 > Keep this behavior reversible and obtain approval before any production
 > rollout.
 
+## Private survey links
+
+Every survey record receives a database-generated UUID token, and newly created
+records use flow version 2. Only that token is accepted by the customer page
+and submission API; DropTop order IDs remain internal for duplicate detection
+and private-feedback emails.
+Legacy order-ID test links are intentionally unsupported, and links do not
+expire yet.
+
+`APP_URL` must be an origin with no path, credentials, query, or fragment.
+Production URLs must use HTTPS; local development may use HTTP only for
+`localhost` or `127.0.0.1`. Survey pages are non-indexable and non-frameable;
+survey pages and submission responses are non-cacheable and use a no-referrer
+policy, including the handoff to Google.
+
+The DropTop webhook payload and authentication contract are still unconfirmed.
+Do not enable the public webhook for production traffic until DropTop supplies
+its real payload documentation and supported signature or secret mechanism.
+
 ## Deployment boundary
 
-Batches 1-3 change the application, local database foundation, documentation,
-and automated tests only. They do not deploy to Railway, migrate the hosted
-Supabase database, change webhook or SMS delivery, alter location mappings,
-change questionnaire routing, or modify provider integrations. A hosted
-database backup and schema verification are required before the later
-controlled production migration.
+Batches 1-4 change the application, local database foundation, documentation,
+and automated tests only. Batch 4 changes the private link identifier and makes
+survey creation conflict-safe, but does not deploy to Railway, migrate hosted
+Supabase, change SMS wording or timing, alter the provisional DropTop payload,
+change location mappings or questionnaire routing, or replace provider
+integrations. A hosted database backup and schema verification are required
+before the later controlled production migration.

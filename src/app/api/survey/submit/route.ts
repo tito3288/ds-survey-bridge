@@ -10,17 +10,20 @@ import {
 } from '@/lib/questionnaire';
 import { sendPrivateFeedbackEmail } from '@/lib/resend';
 import { getSupabaseAdmin } from '@/lib/supabase';
+import { isSurveyToken } from '@/lib/survey-token';
 import type { Database } from '@/types/database';
+
+const SURVEY_NOT_FOUND_RESPONSE = { error: 'Survey not found' } as const;
 
 type RatingSubmission = {
   kind: 'rating';
-  orderId: string;
+  surveyToken: string;
   rating: SurveyScore;
 };
 
 type QuestionnaireSubmission = {
   kind: 'questionnaire';
-  orderId: string;
+  surveyToken: string;
   answers: QuestionnaireAnswers;
   comment: string | null;
 };
@@ -29,7 +32,7 @@ type Submission = RatingSubmission | QuestionnaireSubmission;
 
 type SubmissionValidationResult =
   | { ok: true; value: Submission }
-  | { ok: false; error: string };
+  | { ok: false; error: string; status?: 400 | 404 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -47,10 +50,6 @@ function validateSubmission(body: unknown): SubmissionValidationResult {
     return { ok: false, error: 'Survey submission must be an object' };
   }
 
-  if (typeof body.orderId !== 'string' || body.orderId.trim().length === 0) {
-    return { ok: false, error: 'orderId must be a non-empty string' };
-  }
-
   const hasRating = Object.hasOwn(body, 'rating');
   const hasAnswers = Object.hasOwn(body, 'answers');
 
@@ -62,8 +61,11 @@ function validateSubmission(body: unknown): SubmissionValidationResult {
   }
 
   if (hasRating) {
-    if (!hasOnlyKeys(body, ['orderId', 'rating'])) {
+    if (!hasOnlyKeys(body, ['surveyToken', 'rating'])) {
       return { ok: false, error: 'Unexpected fields in rating submission' };
+    }
+    if (!isSurveyToken(body.surveyToken)) {
+      return { ok: false, error: 'Survey not found', status: 404 };
     }
     if (!isSurveyScore(body.rating)) {
       return { ok: false, error: 'rating must be an integer from 1 to 5' };
@@ -73,17 +75,20 @@ function validateSubmission(body: unknown): SubmissionValidationResult {
       ok: true,
       value: {
         kind: 'rating',
-        orderId: body.orderId,
+        surveyToken: body.surveyToken,
         rating: body.rating,
       },
     };
   }
 
-  if (!hasOnlyKeys(body, ['orderId', 'answers', 'comment'])) {
+  if (!hasOnlyKeys(body, ['surveyToken', 'answers', 'comment'])) {
     return {
       ok: false,
       error: 'Unexpected fields in questionnaire submission',
     };
+  }
+  if (!isSurveyToken(body.surveyToken)) {
+    return { ok: false, error: 'Survey not found', status: 404 };
   }
 
   const questionnaire = validateQuestionnaire({
@@ -98,7 +103,7 @@ function validateSubmission(body: unknown): SubmissionValidationResult {
     ok: true,
     value: {
       kind: 'questionnaire',
-      orderId: body.orderId,
+      surveyToken: body.surveyToken,
       ...questionnaire.value,
     },
   };
@@ -123,7 +128,10 @@ export async function POST(request: NextRequest) {
     const validation = validateSubmission(body);
 
     if (!validation.ok) {
-      return NextResponse.json({ error: validation.error }, { status: 400 });
+      return NextResponse.json(
+        { error: validation.error },
+        { status: validation.status ?? 400 },
+      );
     }
 
     const minimumGoogleRating = getGoogleReviewMinimumRating();
@@ -133,9 +141,9 @@ export async function POST(request: NextRequest) {
     const { data: survey, error: surveyError } = await supabaseAdmin
       .from('surveys')
       .select(
-        'id, location_id, customer_phone, customer_name, services, rating, questionnaire_submitted_at',
+        'id, order_id, location_id, customer_phone, customer_name, services, rating, questionnaire_submitted_at',
       )
-      .eq('order_id', submission.orderId)
+      .eq('survey_token', submission.surveyToken)
       .maybeSingle();
 
     if (surveyError) {
@@ -147,7 +155,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!survey) {
-      return NextResponse.json({ error: 'Order not found' }, { status: 404 });
+      return NextResponse.json(SURVEY_NOT_FOUND_RESPONSE, { status: 404 });
     }
 
     if (submission.kind === 'rating') {
@@ -272,7 +280,7 @@ export async function POST(request: NextRequest) {
       .is('questionnaire_submitted_at', null)
       .lt('rating', minimumGoogleRating)
       .select(
-        'id, rating, location_id, customer_phone, customer_name, services',
+        'id, order_id, rating, location_id, customer_phone, customer_name, services',
       )
       .maybeSingle();
 
@@ -307,7 +315,7 @@ export async function POST(request: NextRequest) {
       }
 
       if (!currentSurvey) {
-        return NextResponse.json({ error: 'Order not found' }, { status: 404 });
+        return NextResponse.json(SURVEY_NOT_FOUND_RESPONSE, { status: 404 });
       }
 
       if (currentSurvey.questionnaire_submitted_at) {
@@ -392,7 +400,7 @@ export async function POST(request: NextRequest) {
 
     try {
       await sendPrivateFeedbackEmail({
-        orderId: submission.orderId,
+        orderId: completedSurvey.order_id,
         rating: completedSurvey.rating,
         answers: submission.answers,
         comment: submission.comment,

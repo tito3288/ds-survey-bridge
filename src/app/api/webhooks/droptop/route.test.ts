@@ -70,19 +70,20 @@ describe('POST /api/webhooks/droptop', () => {
       services: [{ name: 'Fake Oil Change' }],
     });
 
-    const maybeSingle = vi.fn(async () => ({ data: null, error: null }));
-    const lookupQuery = {
-      select: vi.fn(() => ({ eq: vi.fn(() => ({ maybeSingle })) })),
-    };
-    const insert = vi.fn(async () => ({ error: null }));
-    const insertQuery = { insert };
+    const surveyToken = '00000000-0000-4000-8000-000000000123';
+    const maybeSingle = vi.fn(async () => ({
+      data: { survey_token: surveyToken },
+      error: null,
+    }));
+    const select = vi.fn(() => ({ maybeSingle }));
+    const upsert = vi.fn(() => ({ select }));
+    const createQuery = { upsert };
     const sentAtEq = vi.fn(async () => ({ error: null }));
     const update = vi.fn(() => ({ eq: sentAtEq }));
     const updateQuery = { update };
     const from = vi
       .fn()
-      .mockReturnValueOnce(lookupQuery)
-      .mockReturnValueOnce(insertQuery)
+      .mockReturnValueOnce(createQuery)
       .mockReturnValueOnce(updateQuery);
     mocks.getSupabaseAdmin.mockReturnValue({ from });
     mocks.sendSurveySMS.mockResolvedValue('SM_fake_123');
@@ -94,18 +95,78 @@ describe('POST /api/webhooks/droptop', () => {
       ok: true,
       orderId: 'fake-order-123',
     });
-    expect(insert).toHaveBeenCalledWith({
-      order_id: 'fake-order-123',
-      location_id: 'FAKE-LOC-001',
-      customer_phone: '+15555550123',
-      customer_name: 'Fake Customer',
-      services: [{ name: 'Fake Oil Change' }],
-    });
+    expect(upsert).toHaveBeenCalledWith(
+      {
+        order_id: 'fake-order-123',
+        location_id: 'FAKE-LOC-001',
+        customer_phone: '+15555550123',
+        customer_name: 'Fake Customer',
+        services: [{ name: 'Fake Oil Change' }],
+      },
+      { onConflict: 'order_id', ignoreDuplicates: true },
+    );
     expect(mocks.sendSurveySMS).toHaveBeenCalledWith({
       to: '+15555550123',
       customerName: 'Fake Customer',
-      orderId: 'fake-order-123',
+      surveyToken,
     });
+    expect(select).toHaveBeenCalledWith('survey_token');
     expect(update).toHaveBeenCalledWith({ sent_at: expect.any(String) });
+  });
+
+  it('atomically acknowledges a duplicate order without sending another SMS', async () => {
+    mocks.normalizeDroptopPayload.mockReturnValue({
+      orderId: 'fake-order-duplicate',
+      customerName: 'Fake Customer',
+      customerPhone: '+15555550123',
+      locationId: 'FAKE-LOC-001',
+      services: [{ name: 'Fake Oil Change' }],
+    });
+
+    const maybeSingle = vi.fn(async () => ({ data: null, error: null }));
+    const select = vi.fn(() => ({ maybeSingle }));
+    const upsert = vi.fn(() => ({ select }));
+    const from = vi.fn(() => ({ upsert }));
+    mocks.getSupabaseAdmin.mockReturnValue({ from });
+
+    const response = await POST(createRequest('{"provider":"unconfirmed"}'));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      skipped: 'duplicate',
+    });
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ order_id: 'fake-order-duplicate' }),
+      { onConflict: 'order_id', ignoreDuplicates: true },
+    );
+    expect(mocks.sendSurveySMS).not.toHaveBeenCalled();
+    expect(from).toHaveBeenCalledOnce();
+  });
+
+  it('returns a safe internal error when atomic creation fails', async () => {
+    mocks.normalizeDroptopPayload.mockReturnValue({
+      orderId: 'fake-order-database-error',
+      customerPhone: '+15555550123',
+      locationId: 'FAKE-LOC-001',
+      services: [{ name: 'Fake Oil Change' }],
+    });
+
+    const maybeSingle = vi.fn(async () => ({
+      data: null,
+      error: {
+        code: 'XX000',
+        message: 'database unavailable',
+      },
+    }));
+    const select = vi.fn(() => ({ maybeSingle }));
+    const upsert = vi.fn(() => ({ select }));
+    mocks.getSupabaseAdmin.mockReturnValue({ from: vi.fn(() => ({ upsert })) });
+
+    const response = await POST(createRequest('{"provider":"unconfirmed"}'));
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'Internal server error' });
+    expect(mocks.sendSurveySMS).not.toHaveBeenCalled();
   });
 });
