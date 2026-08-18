@@ -10,7 +10,24 @@ import {
   type SurveyScore,
 } from '@/lib/questionnaire';
 
-type Stage = 'rating' | 'questionnaire' | 'done';
+type Stage =
+  | 'rating'
+  | 'questionnaire'
+  | 'google'
+  | 'privateComplete'
+  | 'complete'
+  | 'unavailable';
+
+type SubmissionSource = 'rating' | 'questionnaire';
+
+type SubmissionFailureReason = 'not-found' | 'timeout' | 'retryable';
+
+class SubmissionError extends Error {
+  constructor(readonly reason: SubmissionFailureReason) {
+    super(reason);
+    this.name = 'SubmissionError';
+  }
+}
 
 type RatingPayload = {
   orderId: string;
@@ -37,6 +54,11 @@ const BRAND_RED = '#C8102E';
 const BRAND_BLUE = '#2c3e8c';
 const BRAND_YELLOW = '#FFD700';
 const SCORES: SurveyScore[] = [1, 2, 3, 4, 5];
+const SUBMISSION_TIMEOUT_MS = 15_000;
+const RETRYABLE_ERROR_MESSAGE =
+  'We couldn\'t save your response. Please try again.';
+const TIMEOUT_ERROR_MESSAGE =
+  'This is taking longer than expected. Please try again.';
 
 type SurveyPageProps = {
   params: { orderId: string };
@@ -80,11 +102,13 @@ export default function SurveyPage({ params }: SurveyPageProps) {
   const [stage, setStage] = useState<Stage>('rating');
   const [answers, setAnswers] = useState<Partial<QuestionnaireAnswers>>({});
   const [comment, setComment] = useState('');
+  const [googleReviewUrl, setGoogleReviewUrl] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [missingQuestion, setMissingQuestion] =
     useState<QuestionnaireKey | null>(null);
   const submissionInFlight = useRef(false);
+  const automaticReviewNavigationStarted = useRef(false);
   const stageHeading = useRef<HTMLHeadingElement>(null);
   const firstScoreInputs = useRef<
     Partial<Record<QuestionnaireKey, HTMLInputElement>>
@@ -94,7 +118,16 @@ export default function SurveyPage({ params }: SurveyPageProps) {
     if (stage !== 'rating') {
       stageHeading.current?.focus();
     }
-  }, [stage]);
+
+    if (
+      stage === 'google' &&
+      googleReviewUrl &&
+      !automaticReviewNavigationStarted.current
+    ) {
+      automaticReviewNavigationStarted.current = true;
+      navigateToReview(googleReviewUrl);
+    }
+  }, [googleReviewUrl, stage]);
 
   if (!orderId) {
     return (
@@ -115,6 +148,13 @@ export default function SurveyPage({ params }: SurveyPageProps) {
   }
 
   async function submit(payload: SubmitPayload): Promise<SubmitResponse> {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, SUBMISSION_TIMEOUT_MS);
+
     submissionInFlight.current = true;
     setSubmitting(true);
     setError(null);
@@ -124,25 +164,40 @@ export default function SurveyPage({ params }: SurveyPageProps) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
 
+      if (response.status === 404) {
+        throw new SubmissionError('not-found');
+      }
+
       if (!response.ok) {
-        throw new Error('Submission failed');
+        throw new SubmissionError('retryable');
       }
 
       const data: unknown = await response.json();
       if (!isSubmitResponse(data)) {
-        throw new Error('Unexpected submission response');
+        throw new SubmissionError('retryable');
       }
 
       return data;
+    } catch (submissionError) {
+      if (submissionError instanceof SubmissionError) {
+        throw submissionError;
+      }
+
+      throw new SubmissionError(timedOut ? 'timeout' : 'retryable');
     } finally {
+      window.clearTimeout(timeoutId);
       submissionInFlight.current = false;
       setSubmitting(false);
     }
   }
 
-  function handleNextStep(response: SubmitResponse) {
+  function handleNextStep(
+    response: SubmitResponse,
+    source: SubmissionSource,
+  ) {
     if (response.next === 'questionnaire') {
       setStage('questionnaire');
       return;
@@ -151,14 +206,34 @@ export default function SurveyPage({ params }: SurveyPageProps) {
     if (response.next === 'google') {
       const safeUrl = getSafeReviewUrl(response.url);
       if (safeUrl) {
-        submissionInFlight.current = true;
-        setSubmitting(true);
-        navigateToReview(safeUrl);
+        automaticReviewNavigationStarted.current = false;
+        setGoogleReviewUrl(safeUrl);
+        setStage('google');
         return;
       }
+
+      setStage('complete');
+      return;
     }
 
-    setStage('done');
+    setStage(source === 'questionnaire' ? 'privateComplete' : 'complete');
+  }
+
+  function handleSubmissionError(submissionError: unknown) {
+    if (
+      submissionError instanceof SubmissionError &&
+      submissionError.reason === 'not-found'
+    ) {
+      setStage('unavailable');
+      return;
+    }
+
+    setError(
+      submissionError instanceof SubmissionError &&
+        submissionError.reason === 'timeout'
+        ? TIMEOUT_ERROR_MESSAGE
+        : RETRYABLE_ERROR_MESSAGE,
+    );
   }
 
   async function handleRatingSubmit(event: FormEvent<HTMLFormElement>) {
@@ -167,9 +242,9 @@ export default function SurveyPage({ params }: SurveyPageProps) {
 
     try {
       const response = await submit({ orderId, rating });
-      handleNextStep(response);
-    } catch {
-      setError('Something went wrong. Please try again.');
+      handleNextStep(response, 'rating');
+    } catch (submissionError) {
+      handleSubmissionError(submissionError);
     }
   }
 
@@ -197,9 +272,9 @@ export default function SurveyPage({ params }: SurveyPageProps) {
         answers: completeAnswers,
         ...(trimmedComment ? { comment: trimmedComment } : {}),
       });
-      handleNextStep(response);
-    } catch {
-      setError('Something went wrong. Please try again.');
+      handleNextStep(response, 'questionnaire');
+    } catch (submissionError) {
+      handleSubmissionError(submissionError);
     }
   }
 
@@ -211,13 +286,13 @@ export default function SurveyPage({ params }: SurveyPageProps) {
         className={`w-full rounded-2xl border border-gray-100 bg-white shadow-sm ${
           stage === 'questionnaire'
             ? 'max-w-2xl p-6 sm:p-10'
-            : 'max-w-md p-8 sm:p-10'
+            : 'max-w-md p-6 sm:p-10'
         }`}
       >
         <Wordmark />
 
         {stage === 'rating' && (
-          <form onSubmit={handleRatingSubmit}>
+          <form onSubmit={handleRatingSubmit} aria-busy={submitting}>
             <div className="mt-8 text-center">
               <h2 className="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">
                 How was your oil change?
@@ -239,18 +314,22 @@ export default function SurveyPage({ params }: SurveyPageProps) {
                     type="button"
                     aria-label={`Rate ${score} star${score === 1 ? '' : 's'}`}
                     aria-pressed={rating === score}
-                    onClick={() => setRating(score)}
+                    disabled={submitting}
+                    onClick={() => {
+                      setRating(score);
+                      setError(null);
+                    }}
                     onMouseEnter={() => setHover(score)}
                     onFocus={() => setHover(score)}
                     onBlur={() => setHover(null)}
-                    className="rounded-full p-2 transition-transform hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+                    className="rounded-full p-1 transition-transform hover:scale-110 focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed motion-reduce:transition-none motion-reduce:hover:scale-100 sm:p-2"
                     style={{
-                      ['--tw-ring-color' as string]: BRAND_YELLOW,
+                      outlineColor: BRAND_BLUE,
                     }}
                   >
                     <svg
                       viewBox="0 0 24 24"
-                      className="h-10 w-10 transition-colors sm:h-12 sm:w-12"
+                      className="h-9 w-9 transition-colors sm:h-12 sm:w-12"
                       fill={filled ? BRAND_YELLOW : 'none'}
                       stroke={filled ? BRAND_YELLOW : '#D1D5DB'}
                       strokeWidth={1.5}
@@ -273,10 +352,11 @@ export default function SurveyPage({ params }: SurveyPageProps) {
             <button
               type="submit"
               disabled={rating === null || submitting}
-              className="mt-8 w-full rounded-xl px-6 py-4 text-base font-semibold text-white shadow-sm transition-colors disabled:cursor-not-allowed disabled:bg-gray-300"
+              className="mt-8 w-full rounded-xl px-6 py-4 text-base font-semibold text-white shadow-sm transition-colors focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:bg-gray-300 motion-reduce:transition-none"
               style={{
                 backgroundColor:
                   rating === null || submitting ? undefined : BRAND_RED,
+                outlineColor: BRAND_BLUE,
               }}
             >
               {submitting ? 'Submitting…' : 'Submit'}
@@ -291,11 +371,17 @@ export default function SurveyPage({ params }: SurveyPageProps) {
         )}
 
         {stage === 'questionnaire' && (
-          <form className="mt-8" onSubmit={handleQuestionnaireSubmit} noValidate>
+          <form
+            className="mt-8"
+            onSubmit={handleQuestionnaireSubmit}
+            noValidate
+            aria-busy={submitting}
+          >
             <h2
               ref={stageHeading}
               tabIndex={-1}
-              className="text-2xl font-bold tracking-tight text-gray-900 outline-none sm:text-3xl"
+              className="text-2xl font-bold tracking-tight text-gray-900 focus:rounded-sm focus:outline focus:outline-2 focus:outline-offset-4 sm:text-3xl"
+              style={{ outlineColor: BRAND_BLUE }}
             >
               Tell us about your visit
             </h2>
@@ -331,6 +417,7 @@ export default function SurveyPage({ params }: SurveyPageProps) {
                             value={score}
                             checked={answers[item.key] === score}
                             required
+                            disabled={submitting}
                             aria-invalid={
                               missingQuestion === item.key ? true : undefined
                             }
@@ -348,13 +435,14 @@ export default function SurveyPage({ params }: SurveyPageProps) {
                           />
                           <label
                             htmlFor={inputId}
-                            className="flex min-h-12 cursor-pointer items-center justify-center rounded-lg border border-gray-300 bg-white text-base font-semibold text-gray-700 transition-colors hover:border-gray-400 peer-checked:border-transparent peer-checked:text-white peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2"
+                            className="flex min-h-12 cursor-pointer items-center justify-center rounded-lg border border-gray-300 bg-white text-base font-semibold text-gray-700 transition-colors hover:border-gray-400 peer-checked:border-transparent peer-checked:text-white peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-disabled:cursor-not-allowed peer-disabled:opacity-70 motion-reduce:transition-none"
                             style={{
                               backgroundColor:
                                 answers[item.key] === score
                                   ? BRAND_BLUE
                                   : undefined,
                               ['--tw-outline-color' as string]: BRAND_BLUE,
+                              outlineColor: BRAND_BLUE,
                             }}
                           >
                             {score}
@@ -387,11 +475,12 @@ export default function SurveyPage({ params }: SurveyPageProps) {
                 rows={5}
                 value={comment}
                 maxLength={MAX_COMMENT_LENGTH}
+                disabled={submitting}
                 aria-describedby="comment-count"
                 onChange={(event) =>
                   setComment(event.target.value.slice(0, MAX_COMMENT_LENGTH))
                 }
-                className="mt-2 w-full rounded-xl border border-gray-200 p-3 text-base text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2"
+                className="mt-2 w-full rounded-xl border border-gray-200 p-3 text-base text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:bg-gray-50"
                 style={{
                   ['--tw-ring-color' as string]: BRAND_BLUE,
                 }}
@@ -410,9 +499,10 @@ export default function SurveyPage({ params }: SurveyPageProps) {
             <button
               type="submit"
               disabled={submitting}
-              className="mt-6 w-full rounded-xl px-6 py-4 text-base font-semibold text-white shadow-sm transition-colors disabled:cursor-not-allowed disabled:bg-gray-300"
+              className="mt-6 w-full rounded-xl px-6 py-4 text-base font-semibold text-white shadow-sm transition-colors focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:bg-gray-300 motion-reduce:transition-none"
               style={{
                 backgroundColor: submitting ? undefined : BRAND_RED,
+                outlineColor: BRAND_BLUE,
               }}
             >
               {submitting ? 'Submitting…' : 'Submit feedback'}
@@ -426,34 +516,64 @@ export default function SurveyPage({ params }: SurveyPageProps) {
           </form>
         )}
 
-        {stage === 'done' && (
+        {stage === 'google' && googleReviewUrl && (
           <div className="mt-8 text-center">
-            <div
-              className="mx-auto flex h-14 w-14 items-center justify-center rounded-full"
-              style={{ backgroundColor: BRAND_YELLOW }}
-              aria-hidden="true"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                className="h-8 w-8"
-                fill="none"
-                stroke="#1F2937"
-                strokeWidth={3}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M5 12l5 5L20 7" />
-              </svg>
-            </div>
             <h2
               ref={stageHeading}
               tabIndex={-1}
-              className="mt-5 text-2xl font-bold tracking-tight text-gray-900 outline-none"
+              className="text-2xl font-bold tracking-tight text-gray-900 focus:rounded-sm focus:outline focus:outline-2 focus:outline-offset-4"
+              style={{ outlineColor: BRAND_BLUE }}
             >
-              Thank you for your feedback
+              Opening Google
             </h2>
-            <p className="mt-2 text-sm text-gray-500">
-              We&apos;ll use it to improve your next visit.
+            <p className="mt-3 text-sm text-gray-600">
+              Your Drive &amp; Shine rating has been recorded.
+            </p>
+            <p className="mt-2 text-sm text-gray-600">
+              You&apos;re leaving Drive &amp; Shine to finish a public review on
+              Google.
+            </p>
+            <a
+              href={googleReviewUrl}
+              target="_self"
+              rel="noopener noreferrer"
+              className="mt-6 inline-flex min-h-12 items-center justify-center rounded-xl px-6 py-3 text-base font-semibold text-white shadow-sm focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+              style={{ backgroundColor: BRAND_RED, outlineColor: BRAND_BLUE }}
+            >
+              Continue to Google
+            </a>
+          </div>
+        )}
+
+        {stage === 'privateComplete' && (
+          <Confirmation
+            heading="Thank you for helping us improve."
+            message="Your feedback has been recorded. Our team will use it to improve future visits. You may close this page."
+            headingRef={stageHeading}
+          />
+        )}
+
+        {stage === 'complete' && (
+          <Confirmation
+            heading="Thank you for your feedback."
+            message="Your response has been recorded. You may close this page."
+            headingRef={stageHeading}
+          />
+        )}
+
+        {stage === 'unavailable' && (
+          <div className="mt-8 text-center">
+            <h2
+              ref={stageHeading}
+              tabIndex={-1}
+              className="text-2xl font-bold tracking-tight text-gray-900 focus:rounded-sm focus:outline focus:outline-2 focus:outline-offset-4"
+              style={{ outlineColor: BRAND_BLUE }}
+            >
+              This survey link is unavailable
+            </h2>
+            <p className="mt-3 text-sm text-gray-600">
+              We couldn&apos;t find a survey for this link. Please check that you
+              opened the complete link from your text message.
             </p>
           </div>
         )}
@@ -461,6 +581,45 @@ export default function SurveyPage({ params }: SurveyPageProps) {
         <Footer />
       </div>
     </main>
+  );
+}
+
+type ConfirmationProps = {
+  heading: string;
+  message: string;
+  headingRef: React.RefObject<HTMLHeadingElement>;
+};
+
+function Confirmation({ heading, message, headingRef }: ConfirmationProps) {
+  return (
+    <div className="mt-8 text-center">
+      <div
+        className="mx-auto flex h-14 w-14 items-center justify-center rounded-full"
+        style={{ backgroundColor: BRAND_YELLOW }}
+        aria-hidden="true"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          className="h-8 w-8"
+          fill="none"
+          stroke="#1F2937"
+          strokeWidth={3}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M5 12l5 5L20 7" />
+        </svg>
+      </div>
+      <h2
+        ref={headingRef}
+        tabIndex={-1}
+        className="mt-5 text-2xl font-bold tracking-tight text-gray-900 focus:rounded-sm focus:outline focus:outline-2 focus:outline-offset-4"
+        style={{ outlineColor: BRAND_BLUE }}
+      >
+        {heading}
+      </h2>
+      <p className="mt-3 text-sm text-gray-600">{message}</p>
+    </div>
   );
 }
 

@@ -4,8 +4,10 @@ This Next.js service receives finalized oil-change orders, creates a survey
 record, sends the existing survey link, and stores customer feedback. Customers
 first provide an overall 1-5 rating. Ratings below the configured Google-review
 minimum continue to a private six-question questionnaire; qualifying ratings
-open the location's mapped Google review page. If a review link is unavailable,
-the service finishes safely on the existing thank-you screen.
+show a brief handoff before automatically opening the location's mapped Google
+review page in the same tab. A visible link lets the customer continue manually
+if automatic navigation does not complete. If a review link is unavailable or
+unsafe, the service finishes safely without sending the customer to Google.
 
 ## Requirements
 
@@ -53,6 +55,13 @@ The written improvement comment is optional and limited to 2,000 characters.
 Each completed private questionnaire is stored before an email containing all
 six scores is sent to the comma-separated addresses in `SUPPORT_EMAIL`.
 
+After private feedback is recorded, the customer sees a confirmation explaining
+that the team will use it to improve future visits. A missing or unsafe Google
+review link instead receives a neutral confirmation that the response was
+recorded. Survey links for unknown orders show a dedicated unavailable-link
+page rather than encouraging repeated submissions. Retryable failures preserve
+the customer's selections so they can try again.
+
 `GOOGLE_REVIEW_MIN_RATING` controls the overall-rating threshold and defaults
 to `4`, so the default routes ratings 1-3 to private feedback and ratings 4-5 to
 the mapped Google review page. The questionnaire answers never change that
@@ -67,7 +76,9 @@ reversible rather than being embedded in the database.
 
 ## Deployment boundary
 
-Batch 2 changes the application and local automated tests only. It does not
-deploy to Railway, migrate the hosted Supabase database, change webhook or SMS
-delivery, or alter location mappings. A hosted database backup and schema
-verification are required before the later controlled production migration.
+Batches 1-3 change the application, local database foundation, documentation,
+and automated tests only. They do not deploy to Railway, migrate the hosted
+Supabase database, change webhook or SMS delivery, alter location mappings,
+change questionnaire routing, or modify provider integrations. A hosted
+database backup and schema verification are required before the later
+controlled production migration.
