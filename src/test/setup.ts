@@ -10,6 +10,8 @@ const fakeProviderEnvironment = {
   TWILIO_ACCOUNT_SID: 'AC00000000000000000000000000000000',
   TWILIO_AUTH_TOKEN: 'fake-local-auth-token',
   TWILIO_PHONE_NUMBER: '+15555550100',
+  SURVEY_SMS_DELAY_MINUTES: '0',
+  DELIVERY_WORKER_ENABLED: 'false',
   RESEND_API_KEY: 're_fake_local_key',
   SUPPORT_EMAIL: 'support@example.test',
 } as const;

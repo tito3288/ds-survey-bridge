@@ -59,6 +59,20 @@ function installSupabaseQueries(...queries: object[]) {
   return from;
 }
 
+function installSupabaseRpc<T>(
+  result: LookupResult<T>,
+  ...queries: object[]
+) {
+  const from = vi.fn();
+  for (const query of queries) {
+    from.mockReturnValueOnce(query);
+  }
+  const single = vi.fn(async () => result);
+  const rpc = vi.fn(() => ({ single }));
+  mocks.getSupabaseAdmin.mockReturnValue({ from, rpc });
+  return { from, rpc, single };
+}
+
 const completeAnswers = {
   waitTime: 5,
   serviceSpeed: 4,
@@ -70,28 +84,32 @@ const completeAnswers = {
 
 const SURVEY_TOKEN = '11111111-1111-4111-8111-111111111111';
 const UNKNOWN_SURVEY_TOKEN = '22222222-2222-4222-8222-222222222222';
-const INTERNAL_ORDER_ID = 'FAKE-INTERNAL-ORDER-001';
-
 const surveyRecord = {
   id: 'survey-test-id',
-  order_id: INTERNAL_ORDER_ID,
   location_id: 'FAKE-LOC-001',
-  customer_name: 'Fictional Customer',
-  customer_phone: '+15555550123',
-  services: [{ name: 'Synthetic Oil Change' }],
   rating: null,
   questionnaire_submitted_at: null,
 };
 
-function completedSurveyRecord(rating: number) {
+function completionResult(
+  outcome:
+    | 'completed'
+    | 'already_completed'
+    | 'not_found'
+    | 'rating_missing'
+    | 'not_private',
+  rating: number | null = 2,
+) {
   return {
-    id: surveyRecord.id,
-    order_id: surveyRecord.order_id,
+    outcome,
+    survey_id: outcome === 'not_found' ? null : surveyRecord.id,
+    order_id: outcome === 'not_found' ? null : 'FAKE-INTERNAL-ORDER-001',
     rating,
-    location_id: surveyRecord.location_id,
-    customer_name: surveyRecord.customer_name,
-    customer_phone: surveyRecord.customer_phone,
-    services: surveyRecord.services,
+    location_id: outcome === 'not_found' ? null : surveyRecord.location_id,
+    delivery_job_id:
+      outcome === 'completed'
+        ? '44444444-4444-4444-8444-444444444444'
+        : null,
   };
 }
 
@@ -457,25 +475,15 @@ describe('POST /api/survey/submit initial rating', () => {
 });
 
 describe('POST /api/survey/submit questionnaire', () => {
-  it('atomically stores all six scores and emails the stored overall rating', async () => {
+  it('atomically stores all six scores and enqueues one private email job', async () => {
     const surveyLookup = createLookup({
       data: { ...surveyRecord, rating: 2 },
       error: null,
     });
-    const update = createFilteredUpdate({
-      data: completedSurveyRecord(2),
-      error: null,
-    });
-    const locationLookup = createLookup({
-      data: locationRecord,
-      error: null,
-    });
-    installSupabaseQueries(
+    const { rpc } = installSupabaseRpc(
+      { data: completionResult('completed'), error: null },
       surveyLookup.query,
-      update.query,
-      locationLookup.query,
     );
-    mocks.sendPrivateFeedbackEmail.mockResolvedValue({ id: 'email-test-id' });
 
     const response = await POST(
       createRequest(questionnaireBody('  Fictional private feedback  ')),
@@ -483,95 +491,65 @@ describe('POST /api/survey/submit questionnaire', () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ next: 'complete' });
-    expect(update.update).toHaveBeenCalledWith({
-      wait_time_score: 5,
-      service_speed_score: 4,
-      vehicle_cleanliness_score: 3,
-      additional_services_experience_score: 2,
-      value_score: 4,
-      team_friendliness_score: 5,
-      questionnaire_version: 1,
-      questionnaire_submitted_at: expect.any(String),
-      comment: 'Fictional private feedback',
-    });
-    expect(update.eq).toHaveBeenCalledWith('id', 'survey-test-id');
-    expect(update.is).toHaveBeenCalledWith('questionnaire_submitted_at', null);
-    expect(update.lt).toHaveBeenCalledWith('rating', 4);
-    expect(update.select).toHaveBeenCalledWith(
-      'id, order_id, rating, location_id, customer_phone, customer_name, services',
+    expect(rpc).toHaveBeenCalledWith(
+      'complete_questionnaire_with_email_job',
+      {
+        p_survey_id: 'survey-test-id',
+        p_private_rating_maximum: 3,
+        p_wait_time_score: 5,
+        p_service_speed_score: 4,
+        p_vehicle_cleanliness_score: 3,
+        p_additional_services_experience_score: 2,
+        p_value_score: 4,
+        p_team_friendliness_score: 5,
+        p_questionnaire_version: 1,
+        p_comment: 'Fictional private feedback',
+        p_completed_at: expect.any(String),
+      },
     );
-    expect(mocks.sendPrivateFeedbackEmail).toHaveBeenCalledWith({
-      orderId: INTERNAL_ORDER_ID,
-      rating: 2,
-      answers: completeAnswers,
-      comment: 'Fictional private feedback',
-      locationId: 'FAKE-LOC-001',
-      locationName: 'Fake Training Location',
-      customerName: 'Fictional Customer',
-      customerPhone: '+15555550123',
-      services: [{ name: 'Synthetic Oil Change' }],
-    });
+    expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 
-  it('emails the low rating returned by the atomic update after a concurrent low-rating change', async () => {
+  it('accepts the low rating observed by the atomic completion function', async () => {
     const surveyLookup = createLookup({
       data: { ...surveyRecord, rating: 1 },
       error: null,
     });
-    const update = createFilteredUpdate({
-      data: completedSurveyRecord(3),
-      error: null,
-    });
-    const locationLookup = createLookup({
-      data: locationRecord,
-      error: null,
-    });
-    installSupabaseQueries(
+    const { rpc } = installSupabaseRpc(
+      { data: completionResult('completed', 3), error: null },
       surveyLookup.query,
-      update.query,
-      locationLookup.query,
     );
-    mocks.sendPrivateFeedbackEmail.mockResolvedValue({ id: 'email-test-id' });
 
     const response = await POST(createRequest(questionnaireBody()));
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ next: 'complete' });
-    expect(mocks.sendPrivateFeedbackEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ rating: 3 }),
-    );
+    expect(rpc).toHaveBeenCalledOnce();
+    expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 
-  it('accepts no written comment and still sends the private email', async () => {
-    const surveyLookup = createLookup({
-      data: { ...surveyRecord, rating: 1 },
-      error: null,
-    });
-    const update = createFilteredUpdate({
-      data: completedSurveyRecord(1),
-      error: null,
-    });
-    const locationLookup = createLookup({
-      data: locationRecord,
-      error: null,
-    });
-    installSupabaseQueries(
-      surveyLookup.query,
-      update.query,
-      locationLookup.query,
-    );
-    mocks.sendPrivateFeedbackEmail.mockResolvedValue({ id: 'email-test-id' });
+  it.each([undefined, '   '])(
+    'normalizes an absent or blank comment before enqueueing: %s',
+    async (comment) => {
+      const surveyLookup = createLookup({
+        data: { ...surveyRecord, rating: 1 },
+        error: null,
+      });
+      const { rpc } = installSupabaseRpc(
+        { data: completionResult('completed', 1), error: null },
+        surveyLookup.query,
+      );
 
-    const response = await POST(createRequest(questionnaireBody()));
+      const response = await POST(createRequest(questionnaireBody(comment)));
 
-    expect(response.status).toBe(200);
-    expect(update.update).toHaveBeenCalledWith(
-      expect.objectContaining({ comment: null }),
-    );
-    expect(mocks.sendPrivateFeedbackEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ comment: null }),
-    );
-  });
+      expect(response.status).toBe(200);
+      expect(rpc).toHaveBeenCalledWith(
+        'complete_questionnaire_with_email_job',
+        expect.objectContaining({ p_comment: '' }),
+      );
+      expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
+    },
+  );
 
   it('requires an initial overall rating', async () => {
     const surveyLookup = createLookup({ data: surveyRecord, error: null });
@@ -627,55 +605,36 @@ describe('POST /api/survey/submit questionnaire', () => {
     expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 
-  it('treats a zero update plus completed re-read as an idempotent retry', async () => {
+  it('treats a concurrent completed result as an idempotent retry', async () => {
     const surveyLookup = createLookup({
       data: { ...surveyRecord, rating: 2 },
       error: null,
     });
-    const update = createFilteredUpdate({ data: null, error: null });
-    const currentSurveyLookup = createLookup({
-      data: {
-        rating: 2,
-        questionnaire_submitted_at: '2026-08-18T12:00:00.000Z',
-        location_id: 'FAKE-LOC-001',
-      },
-      error: null,
-    });
-    installSupabaseQueries(
+    const { rpc } = installSupabaseRpc(
+      { data: completionResult('already_completed'), error: null },
       surveyLookup.query,
-      update.query,
-      currentSurveyLookup.query,
     );
 
     const response = await POST(createRequest(questionnaireBody()));
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ next: 'complete' });
+    expect(rpc).toHaveBeenCalledOnce();
     expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 
-  it('routes to Google when a zero update re-reads a concurrent high rating', async () => {
+  it('routes to Google when atomic completion observes a concurrent high rating', async () => {
     const surveyLookup = createLookup({
       data: { ...surveyRecord, rating: 2 },
-      error: null,
-    });
-    const update = createFilteredUpdate({ data: null, error: null });
-    const currentSurveyLookup = createLookup({
-      data: {
-        rating: 4,
-        questionnaire_submitted_at: null,
-        location_id: 'FAKE-LOC-001',
-      },
       error: null,
     });
     const locationLookup = createLookup({
       data: locationRecord,
       error: null,
     });
-    installSupabaseQueries(
+    installSupabaseRpc(
+      { data: completionResult('not_private', 4), error: null },
       surveyLookup.query,
-      update.query,
-      currentSurveyLookup.query,
       locationLookup.query,
     );
 
@@ -689,46 +648,33 @@ describe('POST /api/survey/submit questionnaire', () => {
     expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 
-  it('returns a retryable conflict when a zero update re-reads an incomplete low rating', async () => {
+  it('fails safely when a concurrent high rating has no Google link', async () => {
     const surveyLookup = createLookup({
       data: { ...surveyRecord, rating: 2 },
       error: null,
     });
-    const update = createFilteredUpdate({ data: null, error: null });
-    const currentSurveyLookup = createLookup({
-      data: {
-        rating: 3,
-        questionnaire_submitted_at: null,
-        location_id: 'FAKE-LOC-001',
-      },
-      error: null,
-    });
-    installSupabaseQueries(
+    const locationLookup = createLookup({ data: null, error: null });
+    installSupabaseRpc(
+      { data: completionResult('not_private', 5), error: null },
       surveyLookup.query,
-      update.query,
-      currentSurveyLookup.query,
+      locationLookup.query,
     );
 
     const response = await POST(createRequest(questionnaireBody()));
 
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
-      error: 'Survey response changed; please try again',
-    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ next: 'complete' });
     expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 
-  it('returns the generic 404 when a survey disappears during a questionnaire update', async () => {
+  it('returns the generic 404 when the survey disappears during completion', async () => {
     const surveyLookup = createLookup({
       data: { ...surveyRecord, rating: 2 },
       error: null,
     });
-    const update = createFilteredUpdate({ data: null, error: null });
-    const currentSurveyLookup = createLookup({ data: null, error: null });
-    installSupabaseQueries(
+    installSupabaseRpc(
+      { data: completionResult('not_found', null), error: null },
       surveyLookup.query,
-      update.query,
-      currentSurveyLookup.query,
     );
 
     const response = await POST(createRequest(questionnaireBody()));
@@ -738,79 +684,76 @@ describe('POST /api/survey/submit questionnaire', () => {
     expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 
-  it('does not notify when the atomic questionnaire update fails', async () => {
+  it('returns a retryable conflict if the rating disappears during completion', async () => {
     const surveyLookup = createLookup({
       data: { ...surveyRecord, rating: 2 },
       error: null,
     });
-    const update = createFilteredUpdate({
-      data: null,
-      error: new Error('update failed'),
+    installSupabaseRpc(
+      { data: completionResult('rating_missing', null), error: null },
+      surveyLookup.query,
+    );
+
+    const response = await POST(createRequest(questionnaireBody()));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: 'Submit an overall rating before the questionnaire',
     });
-    installSupabaseQueries(surveyLookup.query, update.query);
+    expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 without an email job when atomic completion fails', async () => {
+    const surveyLookup = createLookup({
+      data: { ...surveyRecord, rating: 2 },
+      error: null,
+    });
+    installSupabaseRpc(
+      { data: null, error: new Error('transaction failed') },
+      surveyLookup.query,
+    );
 
     const response = await POST(createRequest(questionnaireBody()));
 
     expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'Internal server error' });
     expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 
-  it('keeps stored feedback successful when email delivery fails', async () => {
-    const surveyLookup = createLookup({
-      data: { ...surveyRecord, rating: 3 },
-      error: null,
-    });
-    const update = createFilteredUpdate({
-      data: completedSurveyRecord(3),
-      error: null,
-    });
-    const locationLookup = createLookup({
-      data: locationRecord,
-      error: null,
-    });
-    installSupabaseQueries(
-      surveyLookup.query,
-      update.query,
-      locationLookup.query,
-    );
-    mocks.sendPrivateFeedbackEmail.mockRejectedValue(
-      new Error('email unavailable'),
-    );
-
-    const response = await POST(createRequest(questionnaireBody()));
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ next: 'complete' });
-  });
-
-  it('still notifies with the location ID when its display-name lookup fails', async () => {
+  it('returns 500 when atomic completion returns no result', async () => {
     const surveyLookup = createLookup({
       data: { ...surveyRecord, rating: 2 },
       error: null,
     });
-    const update = createFilteredUpdate({
-      data: completedSurveyRecord(2),
-      error: null,
-    });
-    const locationLookup = createLookup({
-      data: null,
-      error: new Error('location unavailable'),
-    });
-    installSupabaseQueries(
-      surveyLookup.query,
-      update.query,
-      locationLookup.query,
-    );
-    mocks.sendPrivateFeedbackEmail.mockResolvedValue({ id: 'email-test-id' });
+    installSupabaseRpc({ data: null, error: null }, surveyLookup.query);
 
     const response = await POST(createRequest(questionnaireBody()));
 
-    expect(response.status).toBe(200);
-    expect(mocks.sendPrivateFeedbackEmail).toHaveBeenCalledWith(
-      expect.objectContaining({
-        locationId: 'FAKE-LOC-001',
-        locationName: undefined,
-      }),
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'Internal server error' });
+    expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 for an invalid atomic completion result', async () => {
+    const surveyLookup = createLookup({
+      data: { ...surveyRecord, rating: 2 },
+      error: null,
+    });
+    installSupabaseRpc(
+      {
+        data: {
+          ...completionResult('not_private', 2),
+          location_id: null,
+        },
+        error: null,
+      },
+      surveyLookup.query,
     );
+
+    const response = await POST(createRequest(questionnaireBody()));
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'Internal server error' });
+    expect(mocks.sendPrivateFeedbackEmail).not.toHaveBeenCalled();
   });
 });

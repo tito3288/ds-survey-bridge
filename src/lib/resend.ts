@@ -26,6 +26,20 @@ function getSupportEmails(): string[] {
     .filter(Boolean);
 }
 
+export function validatePrivateFeedbackEmailConfiguration(): void {
+  const apiKey = getRequiredEnv('RESEND_API_KEY');
+  const recipients = getSupportEmails();
+  if (!apiKey.startsWith('re_')) {
+    throw new Error('RESEND_API_KEY is invalid');
+  }
+  if (
+    recipients.length === 0 ||
+    recipients.some((email) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
+  ) {
+    throw new Error('SUPPORT_EMAIL must contain valid recipients');
+  }
+}
+
 function formatServices(services: Json | null | undefined): string {
   if (typeof services === 'string') {
     return services.trim() || 'Unknown';
@@ -52,17 +66,20 @@ function formatServices(services: Json | null | undefined): string {
   return names.length > 0 ? names.join(', ') : 'Unknown';
 }
 
-export async function sendPrivateFeedbackEmail(params: {
-  orderId: string;
-  rating: SurveyScore;
-  answers: QuestionnaireAnswers;
-  comment?: string | null;
-  locationId?: string;
-  locationName?: string;
-  customerName?: string;
-  customerPhone?: string;
-  services?: Json | null;
-}) {
+export async function sendPrivateFeedbackEmail(
+  params: {
+    orderId: string;
+    rating: SurveyScore;
+    answers: QuestionnaireAnswers;
+    comment?: string | null;
+    locationId?: string;
+    locationName?: string;
+    customerName?: string;
+    customerPhone?: string;
+    services?: Json | null;
+  },
+  options?: { idempotencyKey?: string; signal?: AbortSignal },
+) {
   const {
     orderId,
     rating,
@@ -83,7 +100,7 @@ export async function sendPrivateFeedbackEmail(params: {
     (item) => `${item.label} ${answers[item.key]}/5`,
   );
 
-  return getResendClient().emails.send({
+  const email = {
     // TODO: switch to 'Drive & Shine Survey <noreply@driveandshine.com>' once driveandshine.com is verified in Resend (production).
     from: 'Drive & Shine <onboarding@resend.dev>',
     to: getSupportEmails(),
@@ -104,5 +121,16 @@ export async function sendPrivateFeedbackEmail(params: {
       `Anything we can improve?`,
       normalizedComment,
     ].join('\n'),
-  });
+  };
+
+  return options?.idempotencyKey || options?.signal
+    ? getResendClient().emails.send(email, {
+        ...(options.idempotencyKey
+          ? { idempotencyKey: options.idempotencyKey }
+          : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      } as NonNullable<Parameters<Resend['emails']['send']>[1]> & {
+        signal?: AbortSignal;
+      })
+    : getResendClient().emails.send(email);
 }

@@ -9,6 +9,77 @@ export type Json =
 export type Database = {
   public: {
     Tables: {
+      delivery_jobs: {
+        Row: {
+          accepted_at: string | null
+          attempt_count: number
+          claimed_by_run_id: string | null
+          created_at: string
+          first_provider_call_started_at: string | null
+          id: string
+          kind: Database["public"]["Enums"]["delivery_job_kind"]
+          last_error_category: string | null
+          last_error_code: string | null
+          lease_expires_at: string | null
+          lease_token: string | null
+          next_attempt_at: string
+          provider_call_started_at: string | null
+          provider_message_id: string | null
+          scheduled_at: string
+          status: Database["public"]["Enums"]["delivery_job_status"]
+          survey_id: string
+          updated_at: string
+        }
+        Insert: {
+          accepted_at?: string | null
+          attempt_count?: number
+          claimed_by_run_id?: string | null
+          created_at?: string
+          first_provider_call_started_at?: string | null
+          id?: string
+          kind: Database["public"]["Enums"]["delivery_job_kind"]
+          last_error_category?: string | null
+          last_error_code?: string | null
+          lease_expires_at?: string | null
+          lease_token?: string | null
+          next_attempt_at: string
+          provider_call_started_at?: string | null
+          provider_message_id?: string | null
+          scheduled_at: string
+          status?: Database["public"]["Enums"]["delivery_job_status"]
+          survey_id: string
+          updated_at?: string
+        }
+        Update: {
+          accepted_at?: string | null
+          attempt_count?: number
+          claimed_by_run_id?: string | null
+          created_at?: string
+          first_provider_call_started_at?: string | null
+          id?: string
+          kind?: Database["public"]["Enums"]["delivery_job_kind"]
+          last_error_category?: string | null
+          last_error_code?: string | null
+          lease_expires_at?: string | null
+          lease_token?: string | null
+          next_attempt_at?: string
+          provider_call_started_at?: string | null
+          provider_message_id?: string | null
+          scheduled_at?: string
+          status?: Database["public"]["Enums"]["delivery_job_status"]
+          survey_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "delivery_jobs_survey_id_fkey"
+            columns: ["survey_id"]
+            isOneToOne: false
+            referencedRelation: "surveys"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       locations: {
         Row: {
           created_at: string
@@ -110,10 +181,123 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      claim_delivery_jobs: {
+        Args: {
+          p_lease_seconds: number
+          p_limit: number
+          p_now: string
+          p_run_id: string
+        }
+        Returns: {
+          attempt_count: number
+          id: string
+          kind: Database["public"]["Enums"]["delivery_job_kind"]
+          lease_expires_at: string
+          lease_token: string
+          next_attempt_at: string
+          scheduled_at: string
+          status: Database["public"]["Enums"]["delivery_job_status"]
+          survey_id: string
+        }[]
+      }
+      complete_questionnaire_with_email_job: {
+        Args: {
+          p_additional_services_experience_score: number
+          p_comment: string
+          p_completed_at: string
+          p_private_rating_maximum: number
+          p_questionnaire_version: number
+          p_service_speed_score: number
+          p_survey_id: string
+          p_team_friendliness_score: number
+          p_value_score: number
+          p_vehicle_cleanliness_score: number
+          p_wait_time_score: number
+        }
+        Returns: {
+          delivery_job_id: string
+          location_id: string
+          order_id: string
+          outcome: string
+          rating: number
+          survey_id: string
+        }[]
+      }
+      create_survey_with_sms_job: {
+        Args: {
+          p_customer_name: string
+          p_customer_phone: string
+          p_location_id: string
+          p_order_id: string
+          p_scheduled_at: string
+          p_services: Json
+        }
+        Returns: {
+          created: boolean
+          delivery_job_id: string
+          survey_id: string
+          survey_token: string
+        }[]
+      }
+      mark_delivery_job_dead: {
+        Args: {
+          p_error_category: string
+          p_error_code: string
+          p_failed_at: string
+          p_job_id: string
+          p_lease_token: string
+        }
+        Returns: boolean
+      }
+      mark_delivery_job_provider_started: {
+        Args: { p_job_id: string; p_lease_token: string; p_started_at: string }
+        Returns: {
+          attempt_count: number
+          started: boolean
+        }[]
+      }
+      mark_delivery_job_retry: {
+        Args: {
+          p_error_category: string
+          p_error_code: string
+          p_failed_at: string
+          p_job_id: string
+          p_lease_token: string
+        }
+        Returns: {
+          attempt_count: number
+          next_attempt_at: string
+          status: Database["public"]["Enums"]["delivery_job_status"]
+        }[]
+      }
+      mark_delivery_job_sent: {
+        Args: {
+          p_accepted_at: string
+          p_job_id: string
+          p_lease_token: string
+          p_provider_message_id: string
+        }
+        Returns: boolean
+      }
+      mark_delivery_job_unknown: {
+        Args: {
+          p_error_category: string
+          p_error_code: string
+          p_failed_at: string
+          p_job_id: string
+          p_lease_token: string
+        }
+        Returns: boolean
+      }
     }
     Enums: {
-      [_ in never]: never
+      delivery_job_kind: "survey_sms" | "private_feedback_email"
+      delivery_job_status:
+        | "pending"
+        | "processing"
+        | "sent"
+        | "dead"
+        | "unknown"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -240,6 +424,9 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      delivery_job_kind: ["survey_sms", "private_feedback_email"],
+      delivery_job_status: ["pending", "processing", "sent", "dead", "unknown"],
+    },
   },
 } as const

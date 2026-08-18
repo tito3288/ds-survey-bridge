@@ -6,11 +6,20 @@ import { isSurveyToken } from '@/lib/survey-token';
 
 let twilioClient: ReturnType<typeof twilio> | undefined;
 
+// Keep the SDK request inside the worker's 60-second provider fence. A
+// transport timeout is still treated as an ambiguous outcome, so the job is
+// marked unknown instead of risking a duplicate customer text.
+export const TWILIO_REQUEST_TIMEOUT_MS = 30_000;
+
 function getTwilioClient(): ReturnType<typeof twilio> {
   if (!twilioClient) {
     twilioClient = twilio(
       getRequiredEnv('TWILIO_ACCOUNT_SID'),
       getRequiredEnv('TWILIO_AUTH_TOKEN'),
+      {
+        autoRetry: false,
+        timeout: TWILIO_REQUEST_TIMEOUT_MS,
+      },
     );
   }
 
@@ -53,6 +62,19 @@ function getAppOrigin(): string {
   }
 
   return parsedUrl.origin;
+}
+
+export function validateSurveySmsConfiguration(): void {
+  const accountSid = getRequiredEnv('TWILIO_ACCOUNT_SID');
+  getRequiredEnv('TWILIO_AUTH_TOKEN');
+  const phoneNumber = getRequiredEnv('TWILIO_PHONE_NUMBER');
+  if (!/^AC[0-9a-f]{32}$/i.test(accountSid)) {
+    throw new Error('TWILIO_ACCOUNT_SID is invalid');
+  }
+  if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) {
+    throw new Error('TWILIO_PHONE_NUMBER must use E.164 format');
+  }
+  getAppOrigin();
 }
 
 export async function sendSurveySMS(params: {

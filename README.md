@@ -54,7 +54,8 @@ vehicle cleanliness, additional-service recommendations, value, and team
 friendliness. Every answer uses the same scale: 1 is poor and 5 is excellent.
 The written improvement comment is optional and limited to 2,000 characters.
 Each completed private questionnaire is stored before an email containing all
-six scores is sent to the comma-separated addresses in `SUPPORT_EMAIL`.
+six scores is durably queued for the comma-separated addresses in
+`SUPPORT_EMAIL`.
 
 After private feedback is recorded, the customer sees a confirmation explaining
 that the team will use it to improve future visits. A missing or unsafe Google
@@ -94,12 +95,45 @@ The DropTop webhook payload and authentication contract are still unconfirmed.
 Do not enable the public webhook for production traffic until DropTop supplies
 its real payload documentation and supported signature or secret mechanism.
 
+## Durable message delivery
+
+New survey texts and private-feedback emails are recorded in the service-only
+delivery queue in the same database transaction as the survey work that
+creates them. Webhook and customer requests do not wait on Twilio or Resend.
+Existing survey rows are intentionally not backfilled, preventing old tests or
+stale customers from receiving messages after a later migration.
+
+`SURVEY_SMS_DELAY_MINUTES` defaults to `0`, so a text is eligible for the next
+worker run immediately. The run-to-exit worker is intended for a separate,
+non-public Railway cron service with this configuration:
+
+- Start command: `npm run worker:deliveries`
+- Cron schedule: `*/5 * * * *` (UTC)
+- Required worker-only flag: `DELIVERY_WORKER_ENABLED=true`
+
+Railway cron jobs run no more frequently than every five minutes, may drift by
+a few minutes, and must exit after completing their work. See the
+[Railway cron documentation](https://docs.railway.com/cron-jobs).
+
+Each run claims at most 20 jobs with leases, processes at most five provider
+requests concurrently, and exits before the next scheduled run. Temporary
+failures retry up to six total attempts. Permanent failures become `dead`.
+An SMS with an uncertain provider outcome becomes `unknown` and is not retried,
+avoiding a possible duplicate customer text. Private emails use a stable Resend
+idempotency key so uncertain attempts can retry safely.
+
+The queue's `sent` state means the provider accepted the request. Carrier SMS
+and recipient-inbox delivery callbacks are intentionally deferred to Batch 6.
+Worker logs contain delivery identifiers and sanitized outcome codes only, not
+customer contact details, answers, comments, or raw provider errors.
+
 ## Deployment boundary
 
-Batches 1-4 change the application, local database foundation, documentation,
-and automated tests only. Batch 4 changes the private link identifier and makes
-survey creation conflict-safe, but does not deploy to Railway, migrate hosted
-Supabase, change SMS wording or timing, alter the provisional DropTop payload,
-change location mappings or questionnaire routing, or replace provider
-integrations. A hosted database backup and schema verification are required
-before the later controlled production migration.
+Batches 1-5 change the application, local database foundation, documentation,
+and automated tests only. Batch 5 moves provider work into a durable queue and
+adds the disabled worker command, but does not create a Railway cron service,
+deploy to Railway, migrate hosted Supabase, change SMS wording, alter the
+provisional DropTop payload, change recipients, location mappings, or
+questionnaire routing, or replace provider integrations. A hosted database
+backup and schema verification are required before the later controlled
+production migration.

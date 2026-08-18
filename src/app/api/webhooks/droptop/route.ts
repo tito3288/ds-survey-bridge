@@ -8,7 +8,6 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase';
-import { sendSurveySMS } from '@/lib/twilio';
 import { normalizeDroptopPayload } from '@/server/droptop/normalize-payload';
 import {
   processNormalizedOrder,
@@ -16,57 +15,59 @@ import {
 } from '@/server/droptop/process-normalized-order';
 import type { Json } from '@/types/database';
 
+function getSmsScheduledAt(now = new Date()): string {
+  const configuredDelay = process.env.SURVEY_SMS_DELAY_MINUTES?.trim() || '0';
+  const delayMinutes = Number(configuredDelay);
+
+  if (
+    !/^\d+$/.test(configuredDelay) ||
+    !Number.isSafeInteger(delayMinutes) ||
+    delayMinutes < 0
+  ) {
+    throw new Error(
+      'SURVEY_SMS_DELAY_MINUTES must be a non-negative whole number',
+    );
+  }
+
+  const scheduledAt = new Date(now.getTime() + delayMinutes * 60_000);
+  if (!Number.isFinite(scheduledAt.getTime())) {
+    throw new Error('SURVEY_SMS_DELAY_MINUTES is outside the supported range');
+  }
+
+  return scheduledAt.toISOString();
+}
+
 function createDependencies(): NormalizedOrderDependencies {
   return {
-    async createSurvey(survey) {
+    async createSurveyWithSmsJob(survey) {
       const supabase = getSupabaseAdmin();
       const { data, error } = await supabase
-        .from('surveys')
-        .upsert(
-          {
-            order_id: survey.orderId,
-            location_id: survey.locationId,
-            customer_phone: survey.customerPhone,
-            customer_name: survey.customerName,
-            // request.json() guarantees these provider values are JSON-compatible.
-            services: survey.services as Json,
-          },
-          { onConflict: 'order_id', ignoreDuplicates: true },
-        )
-        .select('survey_token')
-        .maybeSingle();
+        .rpc('create_survey_with_sms_job', {
+          p_order_id: survey.orderId,
+          p_location_id: survey.locationId,
+          p_customer_phone: survey.customerPhone,
+          p_customer_name: survey.customerName ?? '',
+          // request.json() guarantees these provider values are JSON-compatible.
+          p_services: survey.services as Json,
+          p_scheduled_at: getSmsScheduledAt(),
+        })
+        .single();
 
       if (error) {
         return { created: false, error };
       }
 
-      // ON CONFLICT DO NOTHING returns no representation for the losing
-      // concurrent request, which is how the caller distinguishes a duplicate.
       if (!data) {
-        return { created: false, error: null };
-      }
-
-      const surveyToken = data.survey_token;
-      if (typeof surveyToken !== 'string' || surveyToken.length === 0) {
         return {
           created: false,
-          error: new Error('Survey creation did not return a survey token'),
+          error: new Error('Survey creation did not return a result'),
         };
       }
 
-      return { created: true, surveyToken, error: null };
+      return data.created
+        ? { created: true, error: null }
+        : { created: false, error: null };
     },
-    sendSurveySms: sendSurveySMS,
-    async markSurveySent(orderId, sentAt) {
-      const supabase = getSupabaseAdmin();
-      const { error } = await supabase
-        .from('surveys')
-        .update({ sent_at: sentAt })
-        .eq('order_id', orderId);
-
-      return { error };
-    },
-    now: () => new Date(),
     logger: console,
   };
 }

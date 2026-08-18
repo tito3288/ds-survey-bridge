@@ -154,4 +154,25 @@ describe('sendPrivateFeedbackEmail', () => {
       }),
     );
   });
+
+  it('passes the delivery job idempotency key to the Resend request', async () => {
+    const { sendPrivateFeedbackEmail } = await import('./resend');
+
+    await sendPrivateFeedbackEmail(
+      {
+        orderId: 'ORDER-IDEMPOTENT',
+        rating: 2,
+        answers,
+      },
+      { idempotencyKey: 'private-feedback/job-123' },
+    );
+
+    expect(mocks.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subject:
+          'Private oil change survey feedback - Order ORDER-IDEMPOTENT',
+      }),
+      { idempotencyKey: 'private-feedback/job-123' },
+    );
+  });
 });

@@ -14,13 +14,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "worker:deliveries": "node --conditions=react-server --import tsx scripts/process-deliveries.ts",
     "db:start": "supabase start",
     "db:stop": "supabase stop",
     "db:reset": "supabase db reset --local",
-    "test:db:schema": "supabase db reset --local && supabase test db --local supabase/tests/database/questionnaire_foundation.test.sql",
+    "test:db:schema": "supabase db reset --local && supabase test db --local supabase/tests/database/questionnaire_foundation.test.sql && supabase test db --local supabase/tests/database/delivery_queue.test.sql",
     "test:db:upgrade:legacy": "supabase db reset --local --version 001 --sql-paths tests/fixtures/legacy_before_002.sql && supabase migration up --local && supabase test db --local supabase/tests/upgrade/legacy_upgrade.test.sql",
     "test:db:upgrade:tokens": "supabase db reset --local --version 002 --sql-paths tests/fixtures/legacy_before_003.sql && supabase migration up --local && supabase test db --local supabase/tests/upgrade/private_tokens_upgrade.test.sql",
-    "test:db:upgrade": "npm run test:db:upgrade:legacy && npm run test:db:upgrade:tokens",
+    "test:db:upgrade:delivery": "supabase db reset --local --version 003 --sql-paths tests/fixtures/legacy_before_004.sql && supabase migration up --local && supabase test db --local supabase/tests/upgrade/delivery_queue_upgrade.test.sql",
+    "test:db:upgrade": "npm run test:db:upgrade:legacy && npm run test:db:upgrade:tokens && npm run test:db:upgrade:delivery",
     "test:db": "npm run test:db:schema && npm run test:db:upgrade",
     "db:types": "node scripts/database-types.mjs",
     "db:types:check": "node scripts/database-types.mjs --check"
@@ -32,6 +34,7 @@
     "react-dom": "^18",
     "resend": "^6.12.3",
     "server-only": "^0.0.1",
+    "tsx": "^4.23.12",
     "twilio": "^6.0.1"
   },
   "devDependencies": {

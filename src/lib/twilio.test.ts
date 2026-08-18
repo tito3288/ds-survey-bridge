@@ -6,8 +6,12 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('twilio', () => ({
-  default: (accountSid: string, authToken: string) => {
-    mocks.construct(accountSid, authToken);
+  default: (
+    accountSid: string,
+    authToken: string,
+    options: { autoRetry?: boolean; timeout?: number },
+  ) => {
+    mocks.construct(accountSid, authToken, options);
     return { messages: { create: mocks.create } };
   },
 }));
@@ -36,6 +40,10 @@ describe('sendSurveySMS', () => {
     expect(mocks.construct).toHaveBeenCalledWith(
       'AC00000000000000000000000000000000',
       'fake-local-auth-token',
+      {
+        autoRetry: false,
+        timeout: 30_000,
+      },
     );
     expect(mocks.create).toHaveBeenCalledWith({
       body: `Hi Fake Customer! Thanks for visiting Drive & Shine today. How was your oil change? Tap to rate: https://survey.example.test/survey/${surveyToken} — Drive & Shine`,
